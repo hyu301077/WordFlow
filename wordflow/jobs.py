@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from wordflow.dictionary import Dictionary
-from wordflow.importer import Importer
+from wordflow.importer import ImportResult, Importer, ScanReport
 from wordflow.store import Store
 from wordflow.study import StudyService
 
@@ -21,6 +21,29 @@ def scan_documents(db_path, dict_path, root, mode, options, worker, ocr_max_page
             cancel=worker.cancelled,
             progress=lambda current, total, label: worker.progress.emit(current, total, label),
         )
+    finally:
+        store.close()
+        dictionary.close()
+
+
+def import_files(db_path, dict_path, paths, options, worker, ocr_max_pages: int = 40) -> ScanReport:
+    store = Store(Path(db_path))
+    dictionary = Dictionary(Path(dict_path) if dict_path else None)
+    try:
+        importer = Importer(store, dictionary, options, ocr_max_pages=ocr_max_pages)
+        report = ScanReport()
+        files = [Path(path) for path in paths]
+        total = len(files)
+        for index, path in enumerate(files, start=1):
+            if worker.cancelled():
+                report.cancelled = True
+                break
+            worker.progress.emit(index, total, path.name)
+            try:
+                report.add(importer.import_file(path))
+            except Exception as exc:
+                report.add(ImportResult("failed", str(exc), path=str(path)))
+        return report
     finally:
         store.close()
         dictionary.close()

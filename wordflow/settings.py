@@ -29,6 +29,9 @@ DEFAULTS: dict[str, str] = {
     "ai_base_url": "",
     "ai_model": "",
     "ai_api_key": "",
+    "listen_folder": "",
+    "listen_device": "",
+    "listen_rate": "1",
     "desired_retention": "0.90",
     "leech_threshold": "8",
 }

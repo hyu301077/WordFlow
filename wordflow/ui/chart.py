@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QPainter
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QSizePolicy, QWidget
 
 
 class BarChart(QWidget):
@@ -12,7 +12,8 @@ class BarChart(QWidget):
         super().__init__(parent)
         self.labels: list[str] = []
         self.values: list[float] = []
-        self.setMinimumHeight(190)
+        self.setMinimumHeight(160)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
     def set_series(self, labels: list[str], values: list[float]) -> None:
         self.labels = labels

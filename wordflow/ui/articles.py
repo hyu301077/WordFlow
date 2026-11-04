@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QTextEdit,
     QVBoxLayout,
@@ -43,7 +44,8 @@ class ArticlesPage(QWidget):
         left_layout.addLayout(form)
         self.paste = QTextEdit()
         self.paste.setPlaceholderText("在这里粘贴英文文章")
-        self.paste.setFixedHeight(120)
+        self.paste.setMinimumHeight(96)
+        self.paste.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         left_layout.addWidget(self.paste)
         buttons = QHBoxLayout()
         paste_button = QPushButton("导入粘贴的文章")
@@ -57,7 +59,7 @@ class ArticlesPage(QWidget):
         left_layout.addLayout(buttons)
         self.articles = QListWidget()
         self.articles.currentRowChanged.connect(self._select)
-        left_layout.addWidget(self.articles)
+        left_layout.addWidget(self.articles, 1)
         right = QWidget()
         right_layout = QVBoxLayout(right)
         self.summary = QLabel("选择一篇文章后，这里显示词数、掌握情况和高频词。")
@@ -72,6 +74,7 @@ class ArticlesPage(QWidget):
             ("阅读", self._read),
             ("摸底这篇", self._place),
             ("学习本文生词", self._learn),
+            ("导入学习计划", self._make_plan),
             ("保存标题", self._save_meta),
             ("删除", self._delete),
         ):
@@ -81,8 +84,9 @@ class ArticlesPage(QWidget):
         right_layout.addLayout(actions)
         splitter.addWidget(left)
         splitter.addWidget(right)
+        splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
-        layout.addWidget(splitter)
+        layout.addWidget(splitter, 1)
         self._ids: list[int] = []
 
     def on_show(self) -> None:
@@ -186,14 +190,19 @@ class ArticlesPage(QWidget):
         if self._require():
             self.navigator.open_reader(self.current_id)
 
+    def _make_plan(self) -> None:
+        if not self._require():
+            return
+        self.ctx.store.set_study_plan(self.current_id, True)
+        self.navigator.go("plans")
+        self.navigator.pages["plans"].select_plan(self.current_id)
+        tell(self, "已加入学习计划。可以在这里把这篇文章学到全部掌握。")
+
     def _place(self) -> None:
         if not self._require():
             return
         self.navigator.go("placement")
-        self.navigator.pages["placement"].document.setCurrentIndex(
-            max(0, self.navigator.pages["placement"].document.findData(self.current_id))
-        )
-        self.navigator.pages["placement"]._start()
+        self.navigator.pages["placement"].focus_document(self.current_id)
 
     def _learn(self) -> None:
         if not self._require():

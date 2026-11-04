@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QStackedWidget,
     QVBoxLayout,
@@ -16,7 +17,7 @@ from PySide6.QtWidgets import (
 
 from wordflow.jobs import start_session
 from wordflow.study import StudyService
-from wordflow.ui.common import page_header, tell
+from wordflow.ui.common import fill_study_plan_combo, page_header, tell
 from wordflow.ui.study_widget import StudyWidget
 from wordflow.ui.workers import CallWorker
 
@@ -47,7 +48,8 @@ class PracticePage(QWidget):
         self.stack.addWidget(self.setup)
         self.stack.addWidget(self.session_host)
         self.stack.addWidget(self.report)
-        layout.addWidget(self.stack)
+        self.stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        layout.addWidget(self.stack, 1)
 
     def _build_setup(self) -> None:
         layout = QVBoxLayout(self.setup)
@@ -90,9 +92,9 @@ class PracticePage(QWidget):
             form.addWidget(self.mode)
         form.addWidget(QLabel("数量"))
         form.addWidget(self.count)
-        if self.kind != "review":
-            form.addWidget(QLabel("文章"))
-            form.addWidget(self.document)
+        self.document_label = QLabel("学习计划")
+        form.addWidget(self.document_label)
+        form.addWidget(self.document)
         form.addWidget(QLabel("词库"))
         form.addWidget(self.deck)
         form.addStretch(1)
@@ -145,14 +147,16 @@ class PracticePage(QWidget):
             data = self.ctx.store.dashboard(self.ctx.settings.integer("daily_new_limit", 20))
             self.due_label.setText(
                 f"到期生词 {data['due_learning']} 个，熟词抽查 {data['due_mastered']} 个。"
-                "建议先完成复习，再学新词。"
+                "选择某一份学习计划时，只复习那份文档里到期的词。"
             )
             self.count.setValue(self.ctx.settings.integer("review_limit", 50))
             saved = self.ctx.settings.get("review_mode", "card")
         elif self.kind == "learn":
             data = self.ctx.store.dashboard(self.ctx.settings.integer("daily_new_limit", 20))
             remain = max(0, data["daily_goal"] - data["new_today"])
-            self.due_label.setText(f"今日新词目标 {data['daily_goal']} 个，已经学习 {data['new_today']} 个，还剩 {remain} 个。")
+            hint = f"今日新词目标 {data['daily_goal']} 个，已经学习 {data['new_today']} 个，还剩 {remain} 个。"
+            hint += " 选「全部」时学习生词本里的新词；选某一份计划时，只从那份文档里挑。"
+            self.due_label.setText(hint)
             self.count.setValue(max(1, remain or data["daily_goal"]))
             saved = self.ctx.settings.get("learn_mode", "card")
         else:
@@ -163,6 +167,22 @@ class PracticePage(QWidget):
         if index >= 0:
             self.mode.setCurrentIndex(index)
 
+    def focus_document(self, document_id: int, limit: int | None = None) -> None:
+        self.study_widget = None
+        self.stack.setCurrentWidget(self.setup)
+        self._fill_filters()
+        index = self.document.findData(document_id)
+        if index < 0:
+            document = self.ctx.store.get_document(document_id)
+            if document:
+                self.document.addItem(document["title"], document["id"])
+                index = self.document.findData(document_id)
+        if index >= 0:
+            self.document.setCurrentIndex(index)
+        if limit is not None:
+            self.count.setValue(max(1, min(200, int(limit))))
+        self._start()
+
     def start_with_words(self, word_ids: list[int]) -> None:
         self.preset_ids = list(word_ids)
         self._start()
@@ -170,19 +190,13 @@ class PracticePage(QWidget):
     def _fill_filters(self) -> None:
         current_doc = self.document.currentData()
         current_deck = self.deck.currentData()
-        self.document.blockSignals(True)
+        fill_study_plan_combo(self.document, self.ctx.store, current_doc, all_label="全部")
         self.deck.blockSignals(True)
-        self.document.clear()
         self.deck.clear()
-        self.document.addItem("全部文章", None)
-        for document in self.ctx.store.list_documents():
-            self.document.addItem(document["title"], document["id"])
         self.deck.addItem("全部词库", None)
         for deck in self.ctx.store.list_decks():
             self.deck.addItem(deck["name"], deck["id"])
-        self._restore(self.document, current_doc)
         self._restore(self.deck, current_deck)
-        self.document.blockSignals(False)
         self.deck.blockSignals(False)
 
     def _restore(self, combo: QComboBox, value) -> None:
@@ -239,6 +253,7 @@ class PracticePage(QWidget):
                 "mode": mode,
                 "limit": max(limit, len(preset or [])),
                 "deck_id": deck_id,
+                "document_id": document_id,
                 "mistakes_only": self.mistakes.isChecked() and not preset,
                 "word_ids": preset,
             }
@@ -274,7 +289,7 @@ class PracticePage(QWidget):
         self.study_widget = StudyWidget(self.ctx, session_id, self)
         self.study_widget.finished.connect(self._finished)
         self.study_widget.paused.connect(self._paused)
-        self.session_layout.addWidget(self.study_widget)
+        self.session_layout.addWidget(self.study_widget, 1)
         if self.study_widget.done:
             self._finished(StudyService(self.ctx.store, self.ctx.dictionary).report(session_id))
             return

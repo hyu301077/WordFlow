@@ -46,7 +46,7 @@ class ReaderPage(QWidget):
         self.browser.setOpenLinks(False)
         self.browser.setOpenExternalLinks(False)
         self.browser.anchorClicked.connect(self._clicked)
-        layout.addWidget(self.browser)
+        layout.addWidget(self.browser, 1)
         legend = QLabel("琥珀色是学习中，蓝色是复习中，绿色是已掌握，紫色是待确认。标记可以关掉。")
         legend.setObjectName("muted")
         layout.addWidget(legend)

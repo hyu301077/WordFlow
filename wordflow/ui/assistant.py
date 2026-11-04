@@ -90,9 +90,10 @@ class AssistantPage(QWidget):
         self.output.setPlaceholderText("这里显示模型返回的参考内容。")
         layout.addWidget(self.output, 1)
         self.history = QListWidget()
+        self.history.setMinimumHeight(96)
         self.history.currentRowChanged.connect(self._show_history)
         layout.addWidget(QLabel("最近的参考记录"))
-        layout.addWidget(self.history)
+        layout.addWidget(self.history, 1)
         self.records: list[dict] = []
 
     def on_show(self) -> None:

@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from wordflow.constants import NEW_WORD_STATUSES, STATUS_MASTERED
 from wordflow.paths import confusion_path
-from wordflow.ui.common import confirm, format_phonetic, page_header, status_text, tell
+from wordflow.ui.common import confirm, fill_study_plan_combo, format_phonetic, page_header, status_text, tell
 from wordflow.ui.dialogs import BatchDialog, WordDialog
 from wordflow.vocab import export_csv, move_words
 
@@ -100,6 +100,7 @@ class WordListPage(QWidget):
         self.deck = QComboBox()
         filters.addWidget(self.search, 2)
         filters.addWidget(self.sort)
+        filters.addWidget(QLabel("学习计划"))
         filters.addWidget(self.document)
         filters.addWidget(self.deck)
         self.leeches = QCheckBox("只看多次遗忘")
@@ -115,7 +116,7 @@ class WordListPage(QWidget):
         self.view.doubleClicked.connect(lambda _index: self._edit())
         self.view.horizontalHeader().setStretchLastSection(True)
         self.view.verticalHeader().setVisible(False)
-        layout.addWidget(self.view)
+        layout.addWidget(self.view, 1)
         actions = QHBoxLayout()
         add = QPushButton("添加")
         batch = QPushButton("批量添加")
@@ -165,21 +166,15 @@ class WordListPage(QWidget):
     def _fill_filters(self) -> None:
         doc = self.document.currentData()
         deck = self.deck.currentData()
-        self.document.blockSignals(True)
+        fill_study_plan_combo(self.document, self.ctx.store, doc, all_label="全部")
         self.deck.blockSignals(True)
-        self.document.clear()
         self.deck.clear()
-        self.document.addItem("全部文章", None)
-        for document in self.ctx.store.list_documents():
-            self.document.addItem(document["title"], document["id"])
         self.deck.addItem("全部词库", None)
         for item in self.ctx.store.list_decks():
             self.deck.addItem(item["name"], item["id"])
-        for combo, value in ((self.document, doc), (self.deck, deck)):
-            index = combo.findData(value)
-            if index >= 0:
-                combo.setCurrentIndex(index)
-        self.document.blockSignals(False)
+        index = self.deck.findData(deck)
+        if index >= 0:
+            self.deck.setCurrentIndex(index)
         self.deck.blockSignals(False)
 
     def reload(self) -> None:

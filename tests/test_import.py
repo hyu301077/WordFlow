@@ -171,3 +171,164 @@ def test_article_quiz_and_reopen(tmp_path: Path):
     assert kept.wrong_count == 1
     assert reopened.get_session(started["session_id"])["status"] == "active"
     reopened.close()
+
+
+def test_study_plan_picks_unlearned_words_from_that_document(tmp_path: Path):
+    dictionary_path = tmp_path / "dict.db"
+    write_dictionary(dictionary_path)
+    store = Store(tmp_path / "app.db")
+    dictionary = Dictionary(dictionary_path)
+    story = tmp_path / "story.txt"
+    story.write_text("The apple is running across the bank.\n", encoding="utf-8")
+    music = tmp_path / "music.txt"
+    music.write_text("Music and science.\n", encoding="utf-8")
+    importer = Importer(store, dictionary, ExtractOptions())
+    first = importer.import_file(story)
+    second = importer.import_file(music)
+    store.set_study_plan(first.document_id, True)
+    assert store.get_document(first.document_id)["study_plan"] == 1
+    assert store.list_study_plans()[0]["id"] == first.document_id
+    service = StudyService(store, dictionary)
+    untouched = service.start_learn(mode="card", limit=20, document_id=None, deck_id=None)
+    assert untouched["session_id"] is None
+    opened = service.start_learn(mode="card", limit=20, document_id=first.document_id, deck_id=None)
+    lemmas = {item["lemma"] for item in store.session_items(opened["session_id"])}
+    assert {"apple", "run", "bank"} <= lemmas
+    assert "music" not in lemmas and "science" not in lemmas
+    apple = store.get_word_by_lemma("apple")
+    state = store.load_state(apple["id"])
+    state.status = "mastered"
+    store.save_state(apple["id"], state)
+    again = service.start_learn(mode="card", limit=20, document_id=first.document_id, deck_id=None)
+    again_lemmas = {item["lemma"] for item in store.session_items(again["session_id"])}
+    assert "apple" not in again_lemmas
+    assert second.document_id
+    store.update_document_meta(first.document_id, "运动改变大脑", "")
+    story.write_text("The apple is running across the bank again.\n", encoding="utf-8")
+    importer.import_file(story)
+    assert store.get_document(first.document_id)["title"] == "运动改变大脑"
+    assert store.list_study_plans()[0]["title"] == "运动改变大脑"
+    store.close()
+    dictionary.close()
+
+
+def test_selected_files_import_without_a_folder(tmp_path: Path):
+    from wordflow.jobs import import_files
+
+    class _Worker:
+        def cancelled(self) -> bool:
+            return False
+
+        class progress:
+            @staticmethod
+            def emit(*_args) -> None:
+                return None
+
+    dictionary_path = tmp_path / "dict.db"
+    write_dictionary(dictionary_path)
+    story = tmp_path / "story.txt"
+    story.write_text("The apple is running across the bank.\n", encoding="utf-8")
+    other_dir = tmp_path / "elsewhere"
+    other_dir.mkdir()
+    music = other_dir / "music.txt"
+    music.write_text("Music and science.\n", encoding="utf-8")
+    report = import_files(tmp_path / "app.db", dictionary_path, [story, music], ExtractOptions(), _Worker())
+    assert report.count("imported") == 2
+    store = Store(tmp_path / "app.db")
+    assert store.get_word_by_lemma("apple")
+    assert store.get_word_by_lemma("music")
+    store.close()
+
+
+def test_import_page_lists_every_detected_word(tmp_path: Path):
+    import os
+
+    os.environ["WORDFLOW_DATA"] = str(tmp_path / "data")
+    from PySide6.QtWidgets import QApplication
+
+    from wordflow.context import AppContext
+    from wordflow.ui.import_page import ImportPage
+
+    QApplication.instance() or QApplication([])
+    dictionary_path = tmp_path / "dict.db"
+    write_dictionary(dictionary_path)
+    ctx = AppContext(db_path=tmp_path / "app.db", dict_path=dictionary_path)
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "story.txt").write_text("The apple is running across the bank.\n", encoding="utf-8")
+    (root / "more.txt").write_text("Music and science.\n", encoding="utf-8")
+    report = Importer(ctx.store, ctx.dictionary, ExtractOptions()).scan(root, "direct")
+    page = ImportPage(ctx, None)
+    page._done(report)
+    found = []
+    for index in range(page.doc_picker.count()):
+        page.doc_picker.setCurrentIndex(index)
+        found.append({row["lemma"] for row in page.word_model.rows})
+    assert page.doc_picker.count() == 2
+    assert any({"apple", "run", "bank"} <= item for item in found)
+    assert any({"music", "science"} <= item for item in found)
+    ctx.close()
+
+
+def test_study_plan_scopes_review_and_word_books(tmp_path: Path):
+    import os
+    from datetime import timedelta
+
+    os.environ["WORDFLOW_DATA"] = str(tmp_path / "data")
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    from PySide6.QtWidgets import QApplication
+
+    from wordflow.context import AppContext
+    from wordflow.timeutil import now_local
+    from wordflow.ui.main_window import MainWindow
+
+    QApplication.instance() or QApplication([])
+    dictionary_path = tmp_path / "dict.db"
+    write_dictionary(dictionary_path)
+    ctx = AppContext(db_path=tmp_path / "app.db", dict_path=dictionary_path)
+    story = tmp_path / "story.txt"
+    story.write_text("The apple is running across the bank.\n", encoding="utf-8")
+    music = tmp_path / "music.txt"
+    music.write_text("Music and science.\n", encoding="utf-8")
+    importer = Importer(ctx.store, ctx.dictionary, ExtractOptions())
+    first = importer.import_file(story)
+    importer.import_file(music)
+    ctx.store.set_study_plan(first.document_id, True)
+    today = now_local()
+    for lemma in ("apple", "music"):
+        word = ctx.store.get_word_by_lemma(lemma)
+        state = ctx.store.load_state(word["id"])
+        state.status = "learning"
+        state.wrong_count = 2
+        state.next_review_at = today - timedelta(days=1)
+        ctx.store.save_state(word["id"], state)
+    opened = StudyService(ctx.store, ctx.dictionary).start_review(
+        mode="card", limit=20, deck_id=None, document_id=first.document_id
+    )
+    lemmas = {item["lemma"] for item in ctx.store.session_items(opened["session_id"])}
+    assert "apple" in lemmas
+    assert "music" not in lemmas
+    window = MainWindow(ctx)
+    window.go("plans")
+    page = window.pages["plans"]
+    page.select_plan(first.document_id)
+    assert page.apply_name("  句子精听  ")
+    assert page.plan.currentText() == "句子精听"
+    assert "句子精听" in page.progress_label.text()
+    assert "已掌握" in page.progress_label.text()
+    assert any(row["lemma"] == "apple" for row in page.model.rows)
+    assert all(row["lemma"] != "music" for row in page.model.rows)
+    window.go("learning")
+    learning = window.pages["learning"]
+    learning.document.setCurrentIndex(learning.document.findData(first.document_id))
+    assert learning.document.currentText() == "句子精听"
+    shown = {row["lemma"] for row in learning.model.rows}
+    assert "apple" in shown
+    assert "music" not in shown
+    window.go("mistakes")
+    mistakes = window.pages["mistakes"].words
+    mistakes.document.setCurrentIndex(mistakes.document.findData(first.document_id))
+    wrong = {row["lemma"] for row in mistakes.model.rows}
+    assert "apple" in wrong
+    assert "music" not in wrong
+    ctx.close()

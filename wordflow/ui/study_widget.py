@@ -109,7 +109,7 @@ class StudyWidget(QWidget):
         self.feedback.setWordWrap(True)
         self.feedback.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.feedback)
-        outer.addWidget(frame)
+        outer.addWidget(frame, 1)
         hint = QLabel("1–4 选择或评分    Space 朗读    Enter 确认 / 下一题    Ctrl+Z 撤销上一题    S 生词    F 熟词    Esc 退出")
         hint.setObjectName("muted")
         hint.setAlignment(Qt.AlignCenter)

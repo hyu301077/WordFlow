@@ -144,6 +144,18 @@ class Store:
     def get_document(self, document_id: int) -> dict | None:
         return self._one("SELECT * FROM documents WHERE id = ?", (document_id,))
 
+    def list_study_plans(self) -> list[dict]:
+        return self._all(
+            "SELECT * FROM documents WHERE study_plan = 1 ORDER BY updated_at DESC, id DESC"
+        )
+
+    def set_study_plan(self, document_id: int, enabled: bool = True) -> None:
+        with self._guard():
+            self.conn.execute(
+                "UPDATE documents SET study_plan = ?, updated_at = ? WHERE id = ?",
+                (1 if enabled else 0, to_iso(now_local()), document_id),
+            )
+
     def list_documents(self, kind: str | None = None) -> list[dict]:
         if kind:
             return self._all(
@@ -158,6 +170,9 @@ class Store:
             if fields.get("path_key"):
                 existing = self.get_document_by_path(fields["path_key"])
             if existing:
+                title = fields["title"]
+                if int(existing["study_plan"] or 0) and str(existing["title"] or "").strip():
+                    title = existing["title"]
                 self.conn.execute(
                     """
                     UPDATE documents
@@ -167,7 +182,7 @@ class Store:
                     WHERE id = ?
                     """,
                     (
-                        fields["title"],
+                        title,
                         fields.get("kind", existing["kind"]),
                         fields.get("path"),
                         fields.get("tags"),
@@ -281,9 +296,14 @@ class Store:
         )
         return row or {"unique_count": 0, "mastered": 0, "learning": 0, "pending": 0, "untested": 0}
 
+    def document_words(self, document_id: int) -> list[dict]:
+        return self._document_word_rows(document_id, None)
+
     def top_document_words(self, document_id: int, limit: int = 30) -> list[dict]:
-        return self._all(
-            """
+        return self._document_word_rows(document_id, limit)
+
+    def _document_word_rows(self, document_id: int, limit: int | None) -> list[dict]:
+        sql = """
             SELECT w.id, w.lemma, w.phonetic, s.status, s.mastery,
                    SUM(o.frequency) AS frequency,
                    (SELECT gloss_zh FROM senses se WHERE se.word_id = w.id
@@ -294,10 +314,12 @@ class Store:
             WHERE o.document_id = ?
             GROUP BY w.id
             ORDER BY frequency DESC, w.lemma
-            LIMIT ?
-            """,
-            (document_id, limit),
-        )
+        """
+        params: list = [document_id]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        return self._all(sql, tuple(params))
 
     def ensure_word(self, lemma: str, display: str, entry) -> int:
         with self._guard():
@@ -731,6 +753,10 @@ class Store:
             filters.append(f"s.status IN ({marks})")
             params.extend(statuses)
             order = "freq DESC, w.lemma"
+        elif purpose == "new" and document_id:
+            filters.append("s.status != 'mastered'")
+            filters.append("s.last_learned_at IS NULL")
+            order = "freq DESC, CASE WHEN s.mastery = 0 THEN 0 ELSE 1 END, s.mastery ASC, w.lemma"
         elif purpose == "new":
             marks = ",".join("?" for _ in NEW_WORD_STATUSES)
             filters.append(f"s.status IN ({marks})")
@@ -748,17 +774,29 @@ class Store:
         else:
             raise ValueError(purpose)
         clause = " AND ".join(filters)
+        if purpose == "new" and document_id:
+            freq_sql = """
+                (SELECT COALESCE(SUM(frequency), 0) FROM word_occurrences o
+                 WHERE o.word_id = w.id AND o.document_id = ?) AS freq
+            """
+            query_params = [document_id, *params, limit]
+        else:
+            freq_sql = """
+                (SELECT COALESCE(SUM(frequency), 0) FROM word_occurrences o
+                 WHERE o.word_id = w.id) AS freq
+            """
+            query_params = [*params, limit]
         rows = self._all(
             f"""
             SELECT w.id,
-                   (SELECT COALESCE(SUM(frequency), 0) FROM word_occurrences o WHERE o.word_id = w.id) AS freq
+                   {freq_sql}
             FROM words w
             JOIN learning_states s ON s.word_id = w.id
             WHERE {clause}
             ORDER BY {order}
             LIMIT ?
             """,
-            [*params, limit],
+            tuple(query_params),
         )
         return [int(row["id"]) for row in rows]
 
@@ -1132,19 +1170,25 @@ class Store:
             )
         return series
 
-    def top_wrong(self, limit: int = 8) -> list[dict]:
+    def top_wrong(self, limit: int = 8, document_id: int | None = None) -> list[dict]:
+        clause = "s.wrong_count > 0"
+        params: list = []
+        if document_id:
+            clause += " AND w.id IN (SELECT word_id FROM word_occurrences WHERE document_id = ?)"
+            params.append(document_id)
+        params.append(limit)
         return self._all(
-            """
+            f"""
             SELECT w.lemma, s.wrong_count, s.mastery, s.status,
                    (SELECT gloss_zh FROM senses se WHERE se.word_id = w.id
                     ORDER BY se.is_primary DESC, se.sort_order LIMIT 1) AS gloss
             FROM learning_states s
             JOIN words w ON w.id = s.word_id
-            WHERE s.wrong_count > 0
+            WHERE {clause}
             ORDER BY s.wrong_count DESC, w.lemma
             LIMIT ?
             """,
-            (limit,),
+            tuple(params),
         )
 
     def placement_trend(self, limit: int = 12) -> list[dict]:

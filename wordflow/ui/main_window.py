@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QSize, QTimer, Qt
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -12,6 +12,9 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QStackedWidget,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
@@ -23,6 +26,8 @@ from wordflow.ui.assistant import AssistantPage
 from wordflow.ui.common import app_icon
 from wordflow.ui.dashboard import DashboardPage
 from wordflow.ui.import_page import ImportPage
+from wordflow.ui.listen import ListenPage
+from wordflow.ui.plans import PlanPage
 from wordflow.ui.practice import PracticePage
 from wordflow.ui.reader import ReaderPage
 from wordflow.ui.settings_page import SettingsPage
@@ -34,6 +39,8 @@ NAV = [
     ("home", "首页"),
     ("import", "导入文档"),
     ("articles", "英文文章"),
+    ("plans", "学习计划"),
+    ("listen", "语音朗读"),
     ("placement", "摸底测试"),
     ("learn", "学习新词"),
     ("review", "今日复习"),
@@ -46,17 +53,30 @@ NAV = [
 ]
 
 
+class PageStack(QStackedWidget):
+    """页面很高时仍允许窗口缩小，多出来的内容在滚动区域里看。"""
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(640, 420)
+
+    def sizeHint(self) -> QSize:
+        return QSize(960, 640)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, ctx):
         super().__init__()
         self.ctx = ctx
         self.setWindowTitle(f"WordFlow 词流 {__version__}")
         self.setWindowIcon(app_icon())
+        self.setMinimumSize(920, 560)
         self.resize(self.ctx.settings.integer("window_width", 1180), self.ctx.settings.integer("window_height", 760))
         self.pages = {
             "home": DashboardPage(ctx, self),
             "import": ImportPage(ctx, self),
             "articles": ArticlesPage(ctx, self),
+            "plans": PlanPage(ctx, self),
+            "listen": ListenPage(ctx, self),
             "reader": ReaderPage(ctx, self),
             "placement": PracticePage(ctx, self, "placement"),
             "learn": PracticePage(ctx, self, "learn"),
@@ -106,18 +126,30 @@ class MainWindow(QMainWindow):
         content = QWidget()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(22, 18, 22, 18)
-        self.stack = QVBoxLayout()
-        from PySide6.QtWidgets import QStackedWidget
-
-        self.stack_widget = QStackedWidget()
+        self.hosts: dict[str, QScrollArea] = {}
+        self.stack_widget = PageStack()
+        self.stack_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         for key, _label in NAV:
-            self.stack_widget.addWidget(self.pages[key])
-        self.stack_widget.addWidget(self.pages["reader"])
-        content_layout.addWidget(self.stack_widget)
+            self.stack_widget.addWidget(self._host(key))
+        self.stack_widget.addWidget(self._host("reader"))
+        content_layout.addWidget(self.stack_widget, 1)
         layout.addWidget(sidebar)
         layout.addWidget(content, 1)
         self.setCentralWidget(host)
         self._refresh_dict_state()
+
+    def _host(self, key: str) -> QScrollArea:
+        page = self.pages[key]
+        page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        area.setWidget(page)
+        area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.hosts[key] = area
+        return area
 
     def _refresh_dict_state(self) -> None:
         if self.ctx.dictionary.available:
@@ -127,7 +159,7 @@ class MainWindow(QMainWindow):
 
     def go(self, key: str) -> None:
         page = self.pages[key]
-        self.stack_widget.setCurrentWidget(page)
+        self.stack_widget.setCurrentWidget(self.hosts[key])
         for name, button in self.nav_buttons.items():
             button.setChecked(name == key)
         refresher = getattr(page, "on_show", None)

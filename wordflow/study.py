@@ -69,13 +69,19 @@ class StudyService:
         deck_id: int | None,
         mistakes_only: bool = False,
         word_ids: list[int] | None = None,
+        document_id: int | None = None,
     ) -> dict:
         if word_ids:
             ids = list(word_ids)
         else:
             purpose = "mistakes" if mistakes_only else "due"
-            ids = self.store.pick_word_ids(purpose=purpose, limit=max(limit * 3, limit), deck_id=deck_id)
-        return self._open("review", mode, ids, limit, None, deck_id, require_question=mode != "card")
+            ids = self.store.pick_word_ids(
+                purpose=purpose,
+                limit=max(limit * 3, limit),
+                deck_id=deck_id,
+                document_id=document_id,
+            )
+        return self._open("review", mode, ids, limit, document_id, deck_id, require_question=mode != "card")
 
     def answer(
         self,
@@ -211,7 +217,9 @@ class StudyService:
                 }
             )
         if not items:
-            if not ids:
+            if not ids and kind == "learn" and document_id:
+                message = "这份文档的学习计划里，没有还没学过的单词。"
+            elif not ids:
                 message = "当前没有符合条件的单词。"
             elif mode == "cloze":
                 message = "这些单词在你的文章里没有可用例句，没有编造句子。"

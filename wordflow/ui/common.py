@@ -40,6 +40,19 @@ def status_text(status: str | None) -> str:
     return STATUS_LABELS.get(status or "", status or "")
 
 
+def fill_study_plan_combo(combo, store, current_id=None, all_label: str = "全部") -> None:
+    combo.blockSignals(True)
+    combo.clear()
+    combo.addItem(all_label, None)
+    for plan in store.list_study_plans():
+        combo.addItem(plan["title"], plan["id"])
+    if current_id is not None:
+        index = combo.findData(current_id)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+    combo.blockSignals(False)
+
+
 def page_header(title: str, subtitle: str) -> QWidget:
     box = QWidget()
     layout = QVBoxLayout(box)

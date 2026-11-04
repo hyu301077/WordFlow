@@ -8,7 +8,7 @@ from pathlib import Path
 from wordflow.settings import DEFAULTS
 from wordflow.timeutil import now_local, to_iso
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS words (
@@ -225,6 +225,13 @@ def migrate(connection: sqlite3.Connection) -> None:
             "INSERT INTO schema_migrations(version, applied_at) VALUES (3, ?)",
             (to_iso(now_local()),),
         )
+        version = 3
+    if version < 4:
+        _migrate_v4(connection)
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (4, ?)",
+            (to_iso(now_local()),),
+        )
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
@@ -264,6 +271,10 @@ def _migrate_v2(connection: sqlite3.Connection) -> None:
         """
     )
     connection.execute("CREATE INDEX IF NOT EXISTS idx_ai_records_created ON ai_records(created_at)")
+
+
+def _migrate_v4(connection: sqlite3.Connection) -> None:
+    _add_column(connection, "documents", "study_plan", "INTEGER NOT NULL DEFAULT 0")
 
 
 def _migrate_v3(connection: sqlite3.Connection) -> None:

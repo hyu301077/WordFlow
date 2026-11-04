@@ -112,7 +112,8 @@ class SettingsPage(QWidget):
         layout.addWidget(open_dir)
         layout.addWidget(QLabel("词库"))
         self.decks = QListWidget()
-        layout.addWidget(self.decks)
+        self.decks.setMinimumHeight(96)
+        layout.addWidget(self.decks, 1)
         deck_row = QHBoxLayout()
         for label, slot in (("新建词库", self._add_deck), ("删除所选词库", self._delete_deck)):
             button = QPushButton(label)

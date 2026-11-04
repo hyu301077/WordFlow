@@ -19,6 +19,8 @@ def test_window_pages_open(tmp_path, qapp=None):
         "home",
         "import",
         "articles",
+        "plans",
+        "listen",
         "placement",
         "learn",
         "review",
@@ -31,5 +33,22 @@ def test_window_pages_open(tmp_path, qapp=None):
     ):
         window.go(key)
         application.processEvents()
+    window.resize(980, 600)
+    application.processEvents()
+    assert window.width() == 980
+    assert window.height() == 600
+    window.resize(1460, 960)
+    application.processEvents()
+    assert window.width() == 1460
+    assert window.height() == 960
+    window.go("settings")
+    application.processEvents()
+    host = window.stack_widget.currentWidget()
+    assert host.widget() is window.pages["settings"]
+    assert host.viewport().width() > 400
+    window.go("home")
+    application.processEvents()
+    chart = window.pages["home"].chart
+    assert chart.height() >= 160
     window.close()
     ctx.close()

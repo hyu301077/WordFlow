@@ -5,6 +5,7 @@ pywin32>=308; sys_platform == "win32"
 fsrs>=6.3,<7
 pypdfium2>=5
 pillow>=10
+numpy>=2.0
 winrt-runtime>=4.1; sys_platform == "win32"
 winrt-Windows.Foundation; sys_platform == "win32"
 winrt-Windows.Globalization; sys_platform == "win32"

@@ -103,7 +103,7 @@ def test_undo_forecast_cloze_listen_and_leech_queue(tmp_path: Path):
         encoding="utf-8",
     )
     Importer(store, dictionary, ExtractOptions()).import_file(story, kind="article")
-    assert store.conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert store.conn.execute("PRAGMA user_version").fetchone()[0] == 4
     service = StudyService(store, dictionary)
     abandon = store.get_word_by_lemma("abandon")
     apple = store.get_word_by_lemma("apple")
