@@ -76,6 +76,8 @@ class PracticePage(QWidget):
         self.mode.addItem("单词卡片", "card")
         self.mode.addItem("四选一", "quiz")
         self.mode.addItem("拼写", "spell")
+        self.mode.addItem("语境填空", "cloze")
+        self.mode.addItem("听音选义", "listen")
         self.count = QSpinBox()
         self.count.setRange(1, 200)
         self.document = QComboBox()
@@ -124,7 +126,10 @@ class PracticePage(QWidget):
         self.learn_button.clicked.connect(self._learn_wrong)
         back = QPushButton("返回")
         back.clicked.connect(self._back_to_setup)
+        undo = QPushButton("撤销上一题")
+        undo.clicked.connect(self._undo_last)
         row.addWidget(self.learn_button)
+        row.addWidget(undo)
         row.addWidget(back)
         row.addStretch(1)
         layout.addLayout(row)
@@ -298,6 +303,13 @@ class PracticePage(QWidget):
         self.report_body.setText("\n".join(lines))
         self.learn_button.setVisible(self.kind == "placement" and bool(self._learning_ids))
         self.stack.setCurrentWidget(self.report)
+
+    def _undo_last(self) -> None:
+        result = StudyService(self.ctx.store, self.ctx.dictionary).undo_last()
+        if not result:
+            tell(self, "没有可以撤销的作答。", "warn")
+            return
+        tell(self, f"已撤销 {result['lemma']} 的最近一次作答。学习记录已恢复。", "info")
 
     def _learn_wrong(self) -> None:
         if self._learning_ids:

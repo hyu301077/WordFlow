@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QPushButton,
+    QDoubleSpinBox,
     QSlider,
     QSpinBox,
     QVBoxLayout,
@@ -40,6 +41,14 @@ class SettingsPage(QWidget):
         self.goal = QSpinBox()
         self.goal.setRange(1, 200)
         self.goal.valueChanged.connect(lambda value: self.ctx.settings.set("daily_new_limit", value))
+        self.retention = QDoubleSpinBox()
+        self.retention.setRange(0.80, 0.95)
+        self.retention.setSingleStep(0.01)
+        self.retention.setDecimals(2)
+        self.retention.valueChanged.connect(lambda value: self.ctx.settings.set("desired_retention", f"{value:.2f}"))
+        self.leech = QSpinBox()
+        self.leech.setRange(4, 20)
+        self.leech.valueChanged.connect(lambda value: self.ctx.settings.set("leech_threshold", value))
         self.auto_speak = QCheckBox("打开题目时自动朗读")
         self.auto_speak.toggled.connect(lambda checked: self.ctx.settings.set("auto_speak", int(checked)))
         self.voice = QComboBox()
@@ -68,6 +77,10 @@ class SettingsPage(QWidget):
         layout.addWidget(self.theme)
         layout.addWidget(QLabel("每天计划学习的新词数量"))
         layout.addWidget(self.goal)
+        layout.addWidget(QLabel("希望记住的比例（只影响之后的复习，不会改已经排好的日期）"))
+        layout.addWidget(self.retention)
+        layout.addWidget(QLabel("遗忘达到几次后标记为多次遗忘"))
+        layout.addWidget(self.leech)
         layout.addWidget(self.auto_speak)
         voice_row = QHBoxLayout()
         voice_row.addWidget(QLabel("英语语音"))
@@ -126,6 +139,12 @@ class SettingsPage(QWidget):
         self.goal.blockSignals(True)
         self.goal.setValue(self.ctx.settings.integer("daily_new_limit", 20))
         self.goal.blockSignals(False)
+        self.retention.blockSignals(True)
+        self.retention.setValue(self.ctx.settings.real("desired_retention", 0.9))
+        self.retention.blockSignals(False)
+        self.leech.blockSignals(True)
+        self.leech.setValue(self.ctx.settings.integer("leech_threshold", 8))
+        self.leech.blockSignals(False)
         self.auto_speak.setChecked(self.ctx.settings.flag("auto_speak"))
         self.stopwords.setChecked(self.ctx.settings.flag("filter_stopwords"))
         self.proper.setChecked(self.ctx.settings.flag("filter_proper"))

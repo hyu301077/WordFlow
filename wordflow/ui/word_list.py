@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QAbstractTableModel, Qt, QTimer
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -101,6 +102,10 @@ class WordListPage(QWidget):
         filters.addWidget(self.sort)
         filters.addWidget(self.document)
         filters.addWidget(self.deck)
+        self.leeches = QCheckBox("只看多次遗忘")
+        self.leeches.toggled.connect(lambda _checked: self.reload())
+        if kind == "mistakes":
+            filters.addWidget(self.leeches)
         layout.addLayout(filters)
         self.view = QTableView()
         self.model = WordModel()
@@ -192,6 +197,7 @@ class WordListPage(QWidget):
             document_id=self.document.currentData(),
             deck_id=self.deck.currentData(),
             mistakes_only=mistakes,
+            leeches_only=self.kind == "mistakes" and self.leeches.isChecked(),
             sort=self.sort.currentData(),
             limit=_PAGE_SIZE,
             offset=self.page * _PAGE_SIZE,

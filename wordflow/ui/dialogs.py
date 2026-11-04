@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from wordflow.ai import AIError, client_from_settings, explain_prompt
+from wordflow.collocation import phrases_in_sentences
 from wordflow.constants import STATUS_LABELS
 from wordflow.ui.common import format_phonetic, tell
 from wordflow.ui.workers import CallWorker
@@ -100,6 +101,10 @@ class WordDialog(QDialog):
         layout.addWidget(self.notes)
         layout.addWidget(QLabel("补充例句"))
         layout.addWidget(self.example)
+        self.phrases = QLabel()
+        self.phrases.setWordWrap(True)
+        self.phrases.setObjectName("muted")
+        layout.addWidget(self.phrases)
         explain = QPushButton("用在线助手解释例句")
         explain.clicked.connect(self._explain)
         self.ai_note = QLabel("在线解释只显示在这里，不会写入释义，也不会成为测验答案。")
@@ -136,6 +141,9 @@ class WordDialog(QDialog):
         self.lookup_button.setEnabled(False)
         self.phonetic.setText(word["phonetic"] or "")
         self.notes.setPlainText(state["notes"] or "")
+        sentences = [row["sentence"] for row in self.detail["examples"]]
+        found = phrases_in_sentences(word["lemma"], sentences)
+        self.phrases.setText("来自你的文章：" + "；".join(found) if found else "")
         index = self.status.findData(state["status"])
         if index >= 0:
             self.status.setCurrentIndex(index)

@@ -57,6 +57,9 @@ class DashboardPage(QWidget):
         layout.addWidget(QLabel("最近 7 天学习单词数"))
         self.chart = BarChart()
         layout.addWidget(self.chart)
+        layout.addWidget(QLabel("未来 7 天到期单词数（逾期算在今天）"))
+        self.forecast = BarChart()
+        layout.addWidget(self.forecast)
         self.wrong = QLabel()
         self.wrong.setWordWrap(True)
         layout.addWidget(self.wrong)
@@ -73,9 +76,14 @@ class DashboardPage(QWidget):
         self.cards["learning"].setText(str(counts["learning"] + counts["reviewing"]))
         self.cards["mastered"].setText(str(counts["mastered"]))
         self.cards["untested"].setText(str(counts["untested"]))
-        self.average.setText(f"平均掌握程度 {data['average_mastery']}。待确认 {counts['pending']} 个。")
+        leeches = self.ctx.store.leech_count()
+        self.average.setText(
+            f"平均掌握程度 {data['average_mastery']}。待确认 {counts['pending']} 个。多次遗忘 {leeches} 个。"
+        )
         series = self.ctx.store.daily_series(7)
         self.chart.set_series([item["day"] for item in series], [item["studied"] for item in series])
+        forecast = self.ctx.store.due_forecast(7)
+        self.forecast.set_series([item["day"] for item in forecast], [item["count"] for item in forecast])
         wrong = self.ctx.store.top_wrong(5)
         if wrong:
             text = "最近容易出错：" + "、".join(f"{item['lemma']}（{item['wrong_count']} 次）" for item in wrong)

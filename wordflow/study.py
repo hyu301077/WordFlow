@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime
 
+from wordflow.collocation import blank_sentence
 from wordflow.constants import (
     RATING_AGAIN,
     RATING_EASY,
@@ -76,7 +77,17 @@ class StudyService:
             ids = self.store.pick_word_ids(purpose=purpose, limit=max(limit * 3, limit), deck_id=deck_id)
         return self._open("review", mode, ids, limit, None, deck_id, require_question=mode != "card")
 
-    def answer(self, session_id: int, item: dict, *, result: str | None, rating: str | None, chosen: str | None) -> dict:
+    def answer(
+        self,
+        session_id: int,
+        item: dict,
+        *,
+        result: str | None,
+        rating: str | None,
+        chosen: str | None,
+        desired_retention: float = 0.9,
+        leech_threshold: int = 8,
+    ) -> dict:
         session = self.store.get_session(session_id)
         if not session:
             raise ValueError("学习会话不存在")
@@ -94,7 +105,14 @@ class StudyService:
                 rating = RATING_AGAIN
             if rating not in {RATING_AGAIN, RATING_HARD, RATING_GOOD, RATING_EASY, RATING_MASTERED}:
                 raise ValueError("无效的熟悉度")
-            after = apply_rating(before, rating, now, touch_learned=(kind == "learn"))
+            after = apply_rating(
+                before,
+                rating,
+                now,
+                touch_learned=(kind == "learn"),
+                desired_retention=desired_retention,
+                leech_threshold=leech_threshold,
+            )
             correct_flag = 0 if rating == RATING_AGAIN else 1
             if result is None:
                 result = "wrong" if rating == RATING_AGAIN else "correct"
@@ -113,10 +131,31 @@ class StudyService:
         )
         return {"log_id": log_id, "state_before": before, "state_after": after, "rating": rating, "result": result}
 
-    def amend(self, log_id: int, word_id: int, state_before, rating: str, *, kind: str, when: datetime) -> None:
-        after = apply_rating(state_before, rating, when, touch_learned=(kind == "learn"))
+    def amend(
+        self,
+        log_id: int,
+        word_id: int,
+        state_before,
+        rating: str,
+        *,
+        kind: str,
+        when: datetime,
+        desired_retention: float = 0.9,
+        leech_threshold: int = 8,
+    ) -> None:
+        after = apply_rating(
+            state_before,
+            rating,
+            when,
+            touch_learned=(kind == "learn"),
+            desired_retention=desired_retention,
+            leech_threshold=leech_threshold,
+        )
         flag = 0 if rating == RATING_AGAIN else 1
         self.store.amend_answer(log_id, word_id, after, rating, flag)
+
+    def undo_last(self) -> dict | None:
+        return self.store.undo_last_review()
 
     def abandon(self, session_id: int) -> None:
         self.store.abandon_session(session_id)
@@ -174,6 +213,8 @@ class StudyService:
         if not items:
             if not ids:
                 message = "当前没有符合条件的单词。"
+            elif mode == "cloze":
+                message = "这些单词在你的文章里没有可用例句，没有编造句子。"
             elif require_question:
                 message = "这些单词缺少可靠的中文释义，无法生成不会产生歧义的题目。请先在生词本里补充释义。"
             else:
@@ -182,13 +223,28 @@ class StudyService:
         session_id = self.store.create_session(kind, mode, document_id, deck_id, items)
         message = ""
         if skipped:
-            message = f"有 {skipped} 个单词因缺少可靠释义被跳过，没有编造选项。"
+            if mode == "cloze":
+                message = f"有 {skipped} 个单词在你的文章里没有可用例句，没有编造句子。"
+            elif mode == "listen":
+                message = f"有 {skipped} 个单词缺少可靠释义，没有出听音题。"
+            else:
+                message = f"有 {skipped} 个单词因缺少可靠释义被跳过，没有编造选项。"
         return {"session_id": session_id, "queued": len(items), "skipped": skipped, "message": message}
 
     def _make(self, word_id: int, mode: str, document_id: int | None) -> Question | None:
         senses = self.store.senses_of(word_id)
         examples = self.store.examples_of(word_id, document_id)
         example = examples[0]["sentence"] if examples else None
+        if mode == "cloze":
+            word = self.store._one("SELECT lemma FROM words WHERE id = ?", (word_id,))
+            lemma = word["lemma"] if word else ""
+            surfaces = [row["surface"] for row in self.store.sources_of(word_id)]
+            blank = blank_sentence(example or "", [lemma, *surfaces])
+            if not blank or not lemma:
+                return None
+            return Question(word_id=word_id, sense_id=None, pos="", correct=lemma, options=[], example=blank)
+        if mode == "listen":
+            return self.quiz.build(word_id=word_id, senses=senses, example=example)
         if mode in {"quiz", "placement"}:
             return self.quiz.build(word_id=word_id, senses=senses, example=example)
         primary = next((sense for sense in senses if sense.get("is_primary")), senses[0] if senses else None)

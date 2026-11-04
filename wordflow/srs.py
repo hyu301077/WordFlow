@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 from fsrs import Card, Rating, Scheduler, State
@@ -27,18 +27,11 @@ from wordflow.constants import (
     STATUS_REVIEWING,
     STATUS_UNTESTED,
 )
-from wordflow.timeutil import add_days
+from wordflow.timeutil import add_days, from_iso, to_iso
 
 SHORT_STEP_DAYS = 10 / 1440
 MASTERED_INTERVAL = 21.0
-
-_SCHEDULER = Scheduler(
-    desired_retention=0.9,
-    learning_steps=(timedelta(minutes=1), timedelta(minutes=10)),
-    relearning_steps=(timedelta(minutes=10),),
-    maximum_interval=365,
-    enable_fuzzing=False,
-)
+_SCHEDULERS: dict[float, Scheduler] = {}
 
 _RATINGS = {
     RATING_AGAIN: Rating.Again,
@@ -70,6 +63,7 @@ class MemoryState:
     difficulty: float = 0.0
     fsrs_state: str = "new"
     fsrs_step: int = 0
+    leech: int = 0
 
     def copy(self) -> "MemoryState":
         return replace(self)
@@ -81,11 +75,13 @@ def apply_rating(
     now: datetime,
     *,
     touch_learned: bool = False,
+    desired_retention: float = 0.9,
+    leech_threshold: int = 8,
 ) -> MemoryState:
     if rating not in _RATINGS:
         raise ValueError(f"未知的熟悉度：{rating}")
     review_at = _as_utc(now)
-    card, _log = _SCHEDULER.review_card(_to_card(state, now), _RATINGS[rating], review_at)
+    card, _log = _scheduler(desired_retention).review_card(_to_card(state, now), _RATINGS[rating], review_at)
     if rating == RATING_MASTERED:
         card.state = State.Review
         card.step = None
@@ -117,6 +113,8 @@ def apply_rating(
         nxt.wrong_count += 1
         if forgot:
             nxt.lapses += 1
+        if nxt.lapses >= max(1, int(leech_threshold)):
+            nxt.leech = 1
         nxt.mastery = _clamp(nxt.mastery - 18)
         nxt.status = STATUS_LEARNING
         return nxt
@@ -247,6 +245,84 @@ def apply_manual_status(state: MemoryState, status: str, now: datetime) -> Memor
     else:
         raise ValueError(f"未知的词汇状态：{status}")
     return nxt
+
+
+def preview_intervals(
+    state: MemoryState,
+    now: datetime,
+    *,
+    desired_retention: float = 0.9,
+    leech_threshold: int = 8,
+) -> dict[str, str]:
+    """按 Anki 的方式，在作答前算出每个按钮会把复习推到多久以后。"""
+    found = {}
+    for rating in _RATINGS:
+        nxt = apply_rating(
+            state,
+            rating,
+            now,
+            desired_retention=desired_retention,
+            leech_threshold=leech_threshold,
+        )
+        found[rating] = format_interval(nxt.interval_days)
+    return found
+
+
+def retrievability(state: MemoryState, now: datetime, desired_retention: float = 0.9) -> float | None:
+    if state.stability <= 0 or state.last_review_at is None:
+        return None
+    card = _to_card(state, now)
+    if card.stability is None or card.last_review is None:
+        return None
+    value = _scheduler(desired_retention).get_card_retrievability(card, _as_utc(now))
+    return max(0.0, min(1.0, float(value)))
+
+
+def format_interval(days: float) -> str:
+    minutes = max(0.0, days) * 1440
+    if minutes < 90:
+        return f"{max(1, round(minutes))} 分钟"
+    hours = days * 24
+    if hours < 36:
+        return f"{max(1, round(hours))} 小时"
+    return f"{max(1, round(days))} 天"
+
+
+def state_to_dict(state: MemoryState) -> dict:
+    data = asdict(state)
+    for key in ("next_review_at", "last_review_at", "last_learned_at"):
+        data[key] = to_iso(data[key])
+    return data
+
+
+def state_from_dict(data: dict) -> MemoryState:
+    values = dict(data)
+    for key in ("next_review_at", "last_review_at", "last_learned_at"):
+        values[key] = from_iso(values.get(key))
+    return MemoryState(**values)
+
+
+def clamp_retention(value: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = 0.9
+    return min(0.95, max(0.80, round(number, 2)))
+
+
+def _scheduler(desired_retention: float) -> Scheduler:
+    retention = clamp_retention(desired_retention)
+    cached = _SCHEDULERS.get(retention)
+    if cached is None:
+        cached = Scheduler(
+            desired_retention=retention,
+            learning_steps=(timedelta(minutes=1), timedelta(minutes=10)),
+            relearning_steps=(timedelta(minutes=10),),
+            maximum_interval=365,
+            enable_fuzzing=False,
+        )
+        _SCHEDULERS[retention] = cached
+    return cached
 
 
 def _to_card(state: MemoryState, now: datetime) -> Card:

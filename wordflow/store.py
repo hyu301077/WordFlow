@@ -8,7 +8,7 @@ from pathlib import Path
 
 from wordflow.constants import NEW_WORD_STATUSES, STATUS_MASTERED, STATUS_UNTESTED
 from wordflow.db import connect, migrate
-from wordflow.srs import MemoryState
+from wordflow.srs import MemoryState, state_from_dict, state_to_dict
 from wordflow.timeutil import from_iso, now_local, today_str, to_iso
 
 _SORTS = {
@@ -491,6 +491,7 @@ class Store:
             difficulty=row["difficulty"] or 0,
             fsrs_state=row["fsrs_state"] or "new",
             fsrs_step=row["fsrs_step"] or 0,
+            leech=row["leech"] or 0,
         )
 
     def save_state(self, word_id: int, state: MemoryState) -> None:
@@ -502,7 +503,7 @@ class Store:
                     lapses = ?, correct_count = ?, wrong_count = ?, skip_count = ?, streak = ?,
                     next_review_at = ?, last_review_at = ?, last_learned_at = ?,
                     manual_override = ?, notes = ?, updated_at = ?,
-                    stability = ?, difficulty = ?, fsrs_state = ?, fsrs_step = ?
+                    stability = ?, difficulty = ?, fsrs_state = ?, fsrs_step = ?, leech = ?
                 WHERE word_id = ?
                 """,
                 (
@@ -526,6 +527,7 @@ class Store:
                     float(state.difficulty),
                     state.fsrs_state or "new",
                     int(state.fsrs_step),
+                    int(state.leech),
                     word_id,
                 ),
             )
@@ -639,6 +641,7 @@ class Store:
         document_id: int | None = None,
         deck_id: int | None = None,
         mistakes_only: bool = False,
+        leeches_only: bool = False,
         sort: str = "alpha",
         limit: int = 100,
         offset: int = 0,
@@ -651,6 +654,8 @@ class Store:
             params.extend(statuses)
         if mistakes_only:
             where.append("s.wrong_count > 0")
+        if leeches_only:
+            where.append("s.leech = 1")
         if document_id:
             where.append("w.id IN (SELECT word_id FROM word_occurrences WHERE document_id = ?)")
             params.append(document_id)
@@ -735,11 +740,11 @@ class Store:
         elif purpose == "due":
             filters.append("s.next_review_at IS NOT NULL AND s.next_review_at <= ?")
             params.append(now)
-            order = "CASE WHEN s.status = 'mastered' THEN 1 ELSE 0 END, s.wrong_count DESC, s.next_review_at ASC"
+            order = "s.leech DESC, CASE WHEN s.status = 'mastered' THEN 1 ELSE 0 END, s.wrong_count DESC, s.next_review_at ASC"
         elif purpose == "mistakes":
             filters.append("s.wrong_count > 0")
             filters.append("s.status != 'mastered'")
-            order = "s.wrong_count DESC, freq DESC"
+            order = "s.leech DESC, s.wrong_count DESC, freq DESC"
         else:
             raise ValueError(purpose)
         clause = " AND ".join(filters)
@@ -851,8 +856,8 @@ class Store:
                 INSERT INTO review_logs(
                     word_id, session_id, mode, rating, correct, chosen_gloss, correct_gloss,
                     ease_before, ease_after, interval_before, interval_after, next_review_at,
-                    day, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    day, created_at, state_before_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     word_id,
@@ -869,6 +874,7 @@ class Store:
                     to_iso(state_after.next_review_at),
                     today_str(),
                     now_text,
+                    json.dumps(state_to_dict(state_before), ensure_ascii=False),
                 ),
             )
             log_id = int(cursor.lastrowid)
@@ -946,17 +952,89 @@ class Store:
             (kind, limit),
         )
 
+    def undo_last_review(self) -> dict | None:
+        row = self._one(
+            """
+            SELECT r.*, w.lemma
+            FROM review_logs r
+            JOIN words w ON w.id = r.word_id
+            WHERE COALESCE(r.undone, 0) = 0 AND r.state_before_json IS NOT NULL
+            ORDER BY r.id DESC
+            LIMIT 1
+            """
+        )
+        if not row:
+            return None
+        before = state_from_dict(json.loads(row["state_before_json"]))
+        with self._guard():
+            self.save_state(int(row["word_id"]), before)
+            self.conn.execute("UPDATE review_logs SET undone = 1 WHERE id = ?", (row["id"],))
+            if row["session_id"]:
+                self.conn.execute(
+                    """
+                    UPDATE session_items
+                    SET answer = NULL, result = NULL, rating = NULL, answered_at = NULL
+                    WHERE session_id = ? AND word_id = ? AND answered_at = ?
+                    """,
+                    (row["session_id"], row["word_id"], row["created_at"]),
+                )
+                self.conn.execute(
+                    """
+                    UPDATE study_sessions
+                    SET status = 'active', finished_at = NULL, updated_at = ?
+                    WHERE id = ? AND status = 'completed'
+                    """,
+                    (to_iso(now_local()), row["session_id"]),
+                )
+            if row["day"] == today_str():
+                rating = row["rating"] or ""
+                correct_flag = row["correct"]
+                self._bump_daily(
+                    studied=0 if rating == "skip" else -1,
+                    new_learned=-1 if row["mode"] == "learn" and rating != "skip" else 0,
+                    reviewed=-1 if row["mode"] == "review" and rating != "skip" else 0,
+                    correct=-1 if correct_flag == 1 else 0,
+                    wrong=-1 if correct_flag == 0 else 0,
+                )
+        return {"word_id": int(row["word_id"]), "lemma": row["lemma"], "log_id": int(row["id"])}
+
+    def due_forecast(self, days: int = 7) -> list[dict]:
+        from datetime import timedelta
+
+        start = now_local().date()
+        labels = [(start + timedelta(days=offset)).isoformat() for offset in range(max(1, days))]
+        rows = self._all(
+            """
+            SELECT next_review_at FROM learning_states
+            WHERE next_review_at IS NOT NULL AND substr(next_review_at, 1, 10) <= ?
+            """,
+            (labels[-1],),
+        )
+        buckets = {label: 0 for label in labels}
+        today = labels[0]
+        for row in rows:
+            day = (row["next_review_at"] or "")[:10]
+            if day <= today:
+                buckets[today] += 1
+            elif day in buckets:
+                buckets[day] += 1
+        return [{"day": label[5:], "count": buckets[label]} for label in labels]
+
+    def leech_count(self) -> int:
+        row = self._one("SELECT COUNT(*) AS n FROM learning_states WHERE leech = 1")
+        return int(row["n"] if row else 0)
+
     def _bump_daily(self, *, studied=0, new_learned=0, reviewed=0, correct=0, wrong=0) -> None:
         day = today_str()
         self.conn.execute("INSERT INTO daily_stats(day) VALUES (?) ON CONFLICT(day) DO NOTHING", (day,))
         self.conn.execute(
             """
             UPDATE daily_stats SET
-                studied = studied + ?,
-                new_learned = new_learned + ?,
-                reviewed = reviewed + ?,
-                correct = correct + ?,
-                wrong = wrong + ?,
+                studied = MAX(0, studied + ?),
+                new_learned = MAX(0, new_learned + ?),
+                reviewed = MAX(0, reviewed + ?),
+                correct = MAX(0, correct + ?),
+                wrong = MAX(0, wrong + ?),
                 mastered_total = (SELECT COUNT(*) FROM learning_states WHERE status = 'mastered'),
                 learning_total = (SELECT COUNT(*) FROM learning_states WHERE status IN ('learning', 'reviewing')),
                 untested_total = (SELECT COUNT(*) FROM learning_states WHERE status = 'untested')

@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
+from wordflow.collocation import phrases_in_sentences
 from wordflow.constants import RATING_AGAIN, RATING_GOOD, RATING_HARD, RATING_MASTERED
 from wordflow.gloss import norm_gloss
+from wordflow.srs import clamp_retention, format_interval, preview_intervals, retrievability
 from wordflow.study import StudyService
+from wordflow.timeutil import now_local
 from wordflow.ui.common import card, format_phonetic, mark_button, tell
 from wordflow.ui.dialogs import WordDialog
 
@@ -84,6 +88,15 @@ class StudyWidget(QWidget):
         self.example.setWordWrap(True)
         self.example.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.example)
+        self.phrases = QLabel()
+        self.phrases.setWordWrap(True)
+        self.phrases.setAlignment(Qt.AlignCenter)
+        self.phrases.setObjectName("muted")
+        layout.addWidget(self.phrases)
+        self.recall = QLabel()
+        self.recall.setAlignment(Qt.AlignCenter)
+        self.recall.setObjectName("muted")
+        layout.addWidget(self.recall)
         self.spell = QLineEdit()
         self.spell.setPlaceholderText("输入英文单词后按 Enter")
         self.spell.returnPressed.connect(self._submit_spelling)
@@ -97,7 +110,7 @@ class StudyWidget(QWidget):
         self.feedback.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.feedback)
         outer.addWidget(frame)
-        hint = QLabel("1–4 选择或评分    Space 朗读    Enter 确认 / 下一题    S 生词    F 熟词    Esc 退出")
+        hint = QLabel("1–4 选择或评分    Space 朗读    Enter 确认 / 下一题    Ctrl+Z 撤销上一题    S 生词    F 熟词    Esc 退出")
         hint.setObjectName("muted")
         hint.setAlignment(Qt.AlignCenter)
         outer.addWidget(hint)
@@ -109,11 +122,14 @@ class StudyWidget(QWidget):
         self.next_button.clicked.connect(self._next)
         edit = QPushButton("编辑释义")
         edit.clicked.connect(self._edit)
+        undo = QPushButton("撤销上一题")
+        undo.clicked.connect(self._undo)
         leave = QPushButton("暂停并退出")
         leave.clicked.connect(self.paused.emit)
         actions.addWidget(self.reveal_button)
         actions.addWidget(self.next_button)
         actions.addWidget(edit)
+        actions.addWidget(undo)
         actions.addStretch(1)
         actions.addWidget(leave)
         outer.addLayout(actions)
@@ -137,24 +153,30 @@ class StudyWidget(QWidget):
     def _render(self) -> None:
         item = self.current
         mode = self._mode()
+        hide_word = mode in {"cloze", "listen"} and self.phase == "ask"
         self.progress.setText(f"{self.index + 1} / {len(self.items)}")
-        self.word.setText(item["display"] or item["lemma"])
-        self.phonetic.setText(format_phonetic(item["phonetic"]))
-        self.pos_label.setText(f"词性：{item['prompt_pos']}" if item.get("prompt_pos") else "")
-        self.example.setText(item["example"] or "")
+        self.word.setText("填空" if mode == "cloze" and hide_word else "听音" if mode == "listen" and hide_word else item["display"] or item["lemma"])
+        self.phonetic.setText("" if hide_word else format_phonetic(item["phonetic"]))
+        self.speak_button.setVisible(not (mode == "cloze" and self.phase == "ask"))
+        self.pos_label.setText("" if hide_word else f"词性：{item['prompt_pos']}" if item.get("prompt_pos") else "")
+        self.example.setText("" if mode == "listen" and self.phase == "ask" else item["example"] or "")
         show_answer = self.phase in {"rate", "feedback"} or (mode == "spell" and self.phase == "feedback")
-        self.answer_box.setText(self._sense_text() if show_answer else "")
+        self.answer_box.setText(self._sense_text() if show_answer and mode != "cloze" else item["lemma"] if mode == "cloze" and self.phase == "feedback" else "")
         if mode == "card" and self.phase == "ask":
             self.prompt.setText("先回忆词义，再显示释义。")
         elif mode == "spell" and self.phase == "ask":
             self.prompt.setText(item["correct_gloss"] or "待补充")
+        elif mode == "cloze" and self.phase == "ask":
+            self.prompt.setText("根据你文章里的句子，填出空缺的单词。不会朗读这个词。")
+        elif mode == "listen" and self.phase == "ask":
+            self.prompt.setText("听读音，选择中文意思。作答前不显示单词。")
         elif mode == "placement":
             self.prompt.setText("请选择这个词性下的中文意思。只有一个选项是正确的。")
         elif mode == "quiz" and self.phase == "ask":
             self.prompt.setText("请选择正确的中文意思。")
         else:
             self.prompt.setText("")
-        self.spell.setVisible(mode == "spell" and self.phase == "ask")
+        self.spell.setVisible(mode in {"spell", "cloze"} and self.phase == "ask")
         if self.spell.isVisible():
             self.spell.clear()
         self.reveal_button.setVisible(mode == "card" and self.phase == "ask")
@@ -162,7 +184,7 @@ class StudyWidget(QWidget):
         self._clear(self.option_host)
         self._clear(self.extra)
         self.option_buttons = []
-        if mode in {"placement", "quiz"} and self.phase in {"ask", "feedback"}:
+        if mode in {"placement", "quiz", "listen"} and self.phase in {"ask", "feedback"}:
             chosen = (self.record or {}).get("chosen")
             for index, option in enumerate(item["options"]):
                 button = QPushButton(f"{chr(65 + index)}.  {option}")
@@ -187,8 +209,9 @@ class StudyWidget(QWidget):
                 self.extra.addWidget(button)
         if mode == "card" and self.phase == "rate":
             ratings = _REVIEW_RATINGS if self.session["kind"] == "review" else _CARD_RATINGS
+            intervals = self._intervals()
             for rating, label in ratings:
-                button = QPushButton(label)
+                button = QPushButton(f"{label}    {intervals.get(rating, '')}".rstrip())
                 button.clicked.connect(lambda _checked=False, value=rating: self._rate(value))
                 self.option_host.addWidget(button)
         if self.phase == "feedback" and mode == "quiz" and self.record and self.record["result"] == "correct":
@@ -199,19 +222,23 @@ class StudyWidget(QWidget):
         if self.phase == "feedback" and self.record:
             result = self.record["result"]
             gloss = item.get("correct_gloss") or "待补充"
+            scheduled = self._scheduled_text()
             if result == "correct":
-                self.feedback.setText(f"答对了。{gloss}")
+                self.feedback.setText(f"答对了。{gloss}{scheduled}")
             elif result in {"wrong", "unknown"}:
                 chosen = self.record.get("chosen") or ""
                 extra = f"你选择了：{chosen}。 " if chosen else ""
-                self.feedback.setText(f"正确答案：{gloss}。{extra}")
+                self.feedback.setText(f"正确答案：{gloss}。{extra}{scheduled}")
             elif result == "mastered":
-                self.feedback.setText("已加入熟词本。")
+                self.feedback.setText(f"已加入熟词本。{scheduled}")
             else:
-                self.feedback.setText("")
+                self.feedback.setText(scheduled)
         else:
             self.feedback.setText("")
-        if self.phase == "ask" and self.ctx.settings.flag("auto_speak"):
+        self._show_memory(hide_word)
+        if mode == "listen" and self.phase == "ask":
+            self._speak(False)
+        elif self.phase == "ask" and mode != "cloze" and self.ctx.settings.flag("auto_speak"):
             self._speak(False)
         if self.spell.isVisible():
             self.spell.setFocus()
@@ -266,7 +293,7 @@ class StudyWidget(QWidget):
         self._next()
 
     def _submit_spelling(self) -> None:
-        if self._mode() != "spell" or self.phase != "ask":
+        if self._mode() not in {"spell", "cloze"} or self.phase != "ask":
             return
         typed = self.spell.text().strip().lower().replace("\u2019", "'")
         accepted = {self.current["lemma"].lower()}
@@ -292,6 +319,8 @@ class StudyWidget(QWidget):
             rating,
             kind=self.session["kind"],
             when=when,
+            desired_retention=self._retention(),
+            leech_threshold=self._leech_limit(),
         )
         self.feedback.setText("已按你的熟悉度调整复习安排。")
 
@@ -305,6 +334,8 @@ class StudyWidget(QWidget):
                 result=result,
                 rating=rating,
                 chosen=chosen,
+                desired_retention=self._retention(),
+                leech_threshold=self._leech_limit(),
             )
         payload["chosen"] = chosen
         self.record = payload
@@ -327,7 +358,67 @@ class StudyWidget(QWidget):
             self.current["phonetic"] = detail["word"]["phonetic"]
             self._render()
 
+    def _retention(self) -> float:
+        return clamp_retention(self.ctx.settings.real("desired_retention", 0.9))
+
+    def _leech_limit(self) -> int:
+        return self.ctx.settings.integer("leech_threshold", 8)
+
+    def _intervals(self) -> dict[str, str]:
+        state = self.ctx.store.load_state(self.current["word_id"])
+        return preview_intervals(
+            state,
+            now_local(),
+            desired_retention=self._retention(),
+            leech_threshold=self._leech_limit(),
+        )
+
+    def _scheduled_text(self) -> str:
+        after = (self.record or {}).get("state_after")
+        if not after or after.next_review_at is None:
+            return ""
+        return f" 下次大约 {format_interval(after.interval_days)}后。"
+
+    def _show_memory(self, hide_word: bool) -> None:
+        state = self.ctx.store.load_state(self.current["word_id"])
+        notes = []
+        if state.leech:
+            notes.append("多次遗忘")
+        if not hide_word:
+            chance = retrievability(state, now_local(), self._retention())
+            if chance is not None:
+                notes.append(f"当前可提取性 {round(chance * 100)}%")
+        self.recall.setText(" · ".join(notes))
+        if hide_word and self.phase == "ask":
+            self.phrases.setText("")
+            return
+        sentences = [row["sentence"] for row in self.ctx.store.examples_of(self.current["word_id"])]
+        found = phrases_in_sentences(self.current["lemma"], sentences)
+        self.phrases.setText("来自你的文章：" + "；".join(found) if found else "")
+
+    def _undo(self) -> None:
+        result = self.service.undo_last()
+        if not result:
+            tell(self, "没有可以撤销的作答。", "warn")
+            return
+        self.items = self.ctx.store.session_items(self.session["id"])
+        self.session = self.ctx.store.get_session(self.session["id"])
+        for index, item in enumerate(self.items):
+            if item["word_id"] == result["word_id"] and not item["result"]:
+                self.index = index
+                break
+        self.record = None
+        self.phase = "ask"
+        self.done = self.index >= len(self.items)
+        if self.done:
+            return
+        self._render()
+        tell(self, f"已撤销 {result['lemma']} 的最近一次作答。", "info")
+
     def keyPressEvent(self, event) -> None:
+        if event.matches(QKeySequence.Undo) and not self.spell.hasFocus():
+            self._undo()
+            return
         if event.key() == Qt.Key_Escape:
             self.paused.emit()
             return
@@ -342,7 +433,7 @@ class StudyWidget(QWidget):
             elif self.phase == "feedback":
                 self._next()
             return
-        if text in "1234" and mode in {"placement", "quiz"} and self.phase == "ask":
+        if text in "1234" and mode in {"placement", "quiz", "listen"} and self.phase == "ask":
             self._choose(int(text) - 1)
             return
         if text in "1234" and mode == "card" and self.phase == "rate":

@@ -29,6 +29,8 @@ DEFAULTS: dict[str, str] = {
     "ai_base_url": "",
     "ai_model": "",
     "ai_api_key": "",
+    "desired_retention": "0.90",
+    "leech_threshold": "8",
 }
 
 
@@ -52,6 +54,12 @@ class Settings:
 
     def flag(self, key: str) -> bool:
         return self.get(key, "0").strip().lower() in {"1", "true", "yes", "on"}
+
+    def real(self, key: str, default: float = 0.0) -> float:
+        try:
+            return float(self.get(key, str(default)))
+        except (TypeError, ValueError):
+            return default
 
     def integer(self, key: str, default: int = 0) -> int:
         try:
