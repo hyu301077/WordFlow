@@ -1,0 +1,21 @@
+# 每行两个英文单词，用 | 分隔。释义只从本地词典读取。
+affect|effect
+accept|except
+adapt|adopt
+advice|advise
+lose|loose
+quiet|quite
+principal|principle
+compliment|complement
+stationary|stationery
+desert|dessert
+ensure|insure
+farther|further
+imply|infer
+raise|rise
+economic|economical
+historic|historical
+sensible|sensitive
+continuous|continual
+eminent|imminent
+proceed|precede

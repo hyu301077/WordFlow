@@ -1,0 +1,9 @@
+[project]
+name = "wordflow"
+version = "1.0.0"
+description = "WordFlow：从个人英文材料中学习词汇的 Windows 桌面应用"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
