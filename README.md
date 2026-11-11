@@ -1,9 +1,16 @@
 # WordFlow（词流）
 
-从自己的英文文档和文章里提取词汇，做摸底、学习和间隔复习的 Windows 桌面程序。
+英语词汇学习程序。界面在 `frontend`，服务器代码放在 `backend`。
 
-安装、启动和打包见 [使用说明.md](使用说明.md)。
+| 目录 | 内容 |
+| --- | --- |
+| [frontend](frontend) | Windows 桌面客户端。安装、启动和打包见 [使用说明](frontend/使用说明.md)。 |
+| [backend](backend) | 以后的账号、同步和词典服务。现在还没有可运行的服务器。 |
 
-可执行程序：`dist\WordFlow\WordFlow.exe`
+学习记录仍保存在本机的 `%LOCALAPPDATA%\WordFlow`，不放进这两个目录。
 
-旁边的「英语学习」目录保留原来的 TED 文稿。在「导入文档」中直接选择 `talks` 里各主题 `output` 下的文稿文件。
+从 `frontend` 启动：
+
+```powershell
+.\scripts\run.ps1
+```

@@ -12,4 +12,10 @@ data/*.zip
 data/ecdict-tmp/
 data/_smoke.db
 data/_smoke.db-*
+frontend/data/ecdict.db
+frontend/data/stardict.db
+frontend/data/*.zip
+frontend/data/ecdict-tmp/
+frontend/data/_smoke.db
+frontend/data/_smoke.db-*
 *.log
