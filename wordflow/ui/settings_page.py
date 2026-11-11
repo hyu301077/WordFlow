@@ -97,7 +97,7 @@ class SettingsPage(QWidget):
         layout.addWidget(self.acronyms)
         layout.addWidget(self.reminder)
         layout.addWidget(QLabel(
-            "快捷键：1/2/3/4 选择或评分，Space 朗读，Enter 确认或下一题，S 记为生词，F 记为熟词，Esc 退出当前练习。"
+            "快捷键：1/2/3/4 选择或评分，Space 朗读单词，Enter 确认或下一题，S 不认识，F 加入熟词本，Esc 退出当前练习。"
             "拼写输入框里按 Space 会输入空格，请用朗读按钮。"
         ))
         self.dict_label = QLabel()

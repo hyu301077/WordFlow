@@ -32,7 +32,7 @@ class PracticePage(QWidget):
         self.preset_ids: list[int] | None = None
         self.study_widget: StudyWidget | None = None
         titles = {
-            "placement": ("摸底测试", "先判断哪些词已经认识。答错会进入生词本，答对只记为初步认识。"),
+            "placement": ("摸底测试", "先判断哪些词已经认识。可以选「不认识」。学习计划中的正确项按句子里的用法选择。答错或不认识会进入生词本，选出答案后仍可以加入生词本或熟词本。"),
             "learn": ("学习新词", "优先学习还没正式学过、掌握程度低、在你的材料里更常见的词。"),
             "review": ("今日复习", "到期的生词会排在新词前面。答错会缩短间隔，答对会逐渐拉长。"),
         }

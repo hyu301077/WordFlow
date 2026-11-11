@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeySequence
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QButtonGroup, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
 from wordflow.collocation import phrases_in_sentences
 from wordflow.constants import RATING_AGAIN, RATING_GOOD, RATING_HARD, RATING_MASTERED
 from wordflow.gloss import norm_gloss
+from wordflow.playback import ClipPlayer
 from wordflow.srs import clamp_retention, format_interval, preview_intervals, retrievability
 from wordflow.study import StudyService
 from wordflow.timeutil import now_local
@@ -45,6 +48,10 @@ class StudyWidget(QWidget):
         self.phase = "ask"
         self.record = None
         self.option_buttons: list[QPushButton] = []
+        self.sentence_rate = 1.0
+        self._sentence_text = ""
+        self._sentence_wav: Path | None = None
+        self._tts_files: list[Path] = []
         self.setFocusPolicy(Qt.StrongFocus)
         self._build()
         self.done = self.index >= len(self.items)
@@ -67,9 +74,23 @@ class StudyWidget(QWidget):
         self.phonetic.setAlignment(Qt.AlignCenter)
         self.speak_button = QPushButton("朗读")
         self.speak_button.clicked.connect(lambda: self._speak(True))
+        self.speak_sentence = QPushButton("朗读例句")
+        self.speak_sentence.clicked.connect(lambda: self._speak_sentence(True))
+        self.sentence_rate_group = QButtonGroup(self)
+        self.sentence_rate_group.setExclusive(True)
+        self.sentence_rate_buttons: dict[float, QPushButton] = {}
+        for rate in (1.0, 0.75):
+            button = QPushButton(f"{rate:g}×")
+            button.setCheckable(True)
+            button.clicked.connect(lambda _checked=False, value=rate: self._choose_sentence_rate(value))
+            self.sentence_rate_group.addButton(button)
+            self.sentence_rate_buttons[rate] = button
         meta.addStretch(1)
         meta.addWidget(self.phonetic)
         meta.addWidget(self.speak_button)
+        meta.addWidget(self.speak_sentence)
+        for button in self.sentence_rate_buttons.values():
+            meta.addWidget(button)
         meta.addStretch(1)
         layout.addLayout(meta)
         self.pos_label = QLabel()
@@ -110,7 +131,7 @@ class StudyWidget(QWidget):
         self.feedback.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.feedback)
         outer.addWidget(frame, 1)
-        hint = QLabel("1–4 选择或评分    Space 朗读    Enter 确认 / 下一题    Ctrl+Z 撤销上一题    S 生词    F 熟词    Esc 退出")
+        hint = QLabel("1–4 选择或评分    Space 朗读单词    Enter 确认 / 下一题    Ctrl+Z 撤销上一题    S 不认识    F 加入熟词本    Esc 退出")
         hint.setObjectName("muted")
         hint.setAlignment(Qt.AlignCenter)
         outer.addWidget(hint)
@@ -133,6 +154,9 @@ class StudyWidget(QWidget):
         actions.addStretch(1)
         actions.addWidget(leave)
         outer.addLayout(actions)
+        self.sentence_player = ClipPlayer(self)
+        self.sentence_player.failed.connect(self._sentence_failed)
+        self._restore_sentence_rate()
 
     @property
     def current(self) -> dict:
@@ -157,7 +181,12 @@ class StudyWidget(QWidget):
         self.progress.setText(f"{self.index + 1} / {len(self.items)}")
         self.word.setText("填空" if mode == "cloze" and hide_word else "听音" if mode == "listen" and hide_word else item["display"] or item["lemma"])
         self.phonetic.setText("" if hide_word else format_phonetic(item["phonetic"]))
+        placement = mode == "placement"
+        self.speak_button.setText("朗读单词" if placement else "朗读")
         self.speak_button.setVisible(not (mode == "cloze" and self.phase == "ask"))
+        self.speak_sentence.setVisible(placement)
+        for button in self.sentence_rate_buttons.values():
+            button.setVisible(placement)
         self.pos_label.setText("" if hide_word else f"词性：{item['prompt_pos']}" if item.get("prompt_pos") else "")
         self.example.setText("" if mode == "listen" and self.phase == "ask" else item["example"] or "")
         show_answer = self.phase in {"rate", "feedback"} or (mode == "spell" and self.phase == "feedback")
@@ -198,14 +227,13 @@ class StudyWidget(QWidget):
                         mark_button(button, "wrong")
                 self.option_host.addWidget(button)
                 self.option_buttons.append(button)
-        if mode == "placement" and self.phase == "ask":
-            for label, handler in (
-                ("不认识", lambda: self._placement("unknown")),
-                ("跳过", lambda: self._placement("skip")),
-                ("已熟练掌握", lambda: self._placement("mastered")),
-            ):
+        if mode == "placement" and self.phase in {"ask", "feedback"}:
+            actions = [("加入生词本", "unknown"), ("加入熟词本", "mastered")]
+            if self.phase == "ask":
+                actions = [("不认识", "unknown"), ("跳过", "skip"), *actions]
+            for label, value in actions:
                 button = QPushButton(label)
-                button.clicked.connect(handler)
+                button.clicked.connect(lambda _checked=False, outcome=value: self._placement(outcome))
                 self.extra.addWidget(button)
         if mode == "card" and self.phase == "rate":
             ratings = _REVIEW_RATINGS if self.session["kind"] == "review" else _CARD_RATINGS
@@ -225,12 +253,14 @@ class StudyWidget(QWidget):
             scheduled = self._scheduled_text()
             if result == "correct":
                 self.feedback.setText(f"答对了。{gloss}{scheduled}")
-            elif result in {"wrong", "unknown"}:
+            elif result == "unknown":
+                self.feedback.setText(f"已加入生词本。正确答案：{gloss}。{scheduled}")
+            elif result == "wrong":
                 chosen = self.record.get("chosen") or ""
                 extra = f"你选择了：{chosen}。 " if chosen else ""
                 self.feedback.setText(f"正确答案：{gloss}。{extra}{scheduled}")
             elif result == "mastered":
-                self.feedback.setText(f"已加入熟词本。{scheduled}")
+                self.feedback.setText(f"已加入熟词本。{gloss}。{scheduled}")
             else:
                 self.feedback.setText(scheduled)
         else:
@@ -256,11 +286,59 @@ class StudyWidget(QWidget):
         return "\n".join(lines)
 
     def _speak(self, manual: bool) -> None:
+        self.sentence_player.stop()
         text = self.current["display"] or self.current["lemma"]
-        if self.phase != "ask" and self.current.get("example"):
+        if self._mode() != "placement" and self.phase != "ask" and self.current.get("example"):
             text = self.current["example"]
         ok, message = self.ctx.speech.speak(text)
         if manual and not ok:
+            tell(self, message, "warn")
+
+    def _restore_sentence_rate(self) -> None:
+        rate = self.ctx.settings.real("placement_sentence_rate", 1.0)
+        if not any(abs(rate - item) < 0.001 for item in self.sentence_rate_buttons):
+            rate = 1.0
+        self._choose_sentence_rate(rate, replay=False)
+
+    def _choose_sentence_rate(self, rate: float, replay: bool = True) -> None:
+        self.sentence_rate = rate
+        self.ctx.settings.set("placement_sentence_rate", f"{rate:g}")
+        button = self.sentence_rate_buttons.get(rate)
+        if button:
+            button.setChecked(True)
+        example = (self.current.get("example") or "").strip() if self.items and 0 <= self.index < len(self.items) else ""
+        if replay and example and example == self._sentence_text and (self.sentence_player._playing or self.sentence_player._paused):
+            self.sentence_player.set_rate(rate)
+
+    def _speak_sentence(self, manual: bool) -> None:
+        text = (self.current.get("example") or "").strip()
+        if not text:
+            if manual:
+                tell(self, "这个单词没有实例句子。", "warn")
+            return
+        self.sentence_player.stop()
+        if text != self._sentence_text or self._sentence_wav is None or not self._sentence_wav.is_file():
+            path, message = self.ctx.speech.synthesize(text)
+            if path is None:
+                if manual:
+                    tell(self, message, "warn")
+                return
+            self._forget_tts(path)
+            self._sentence_text = text
+            self._sentence_wav = path
+            self._tts_files.append(path)
+        self.sentence_player.rate = self.sentence_rate
+        self.sentence_player.play_file(str(self._sentence_wav))
+
+    def _forget_tts(self, keep: Path) -> None:
+        for path in list(self._tts_files):
+            if path == keep:
+                continue
+            path.unlink(missing_ok=True)
+            self._tts_files.remove(path)
+
+    def _sentence_failed(self, message: str) -> None:
+        if message:
             tell(self, message, "warn")
 
     def _choose(self, index: int) -> None:
@@ -275,8 +353,22 @@ class StudyWidget(QWidget):
 
     def _placement(self, result: str) -> None:
         if result == "skip":
+            if self.phase != "ask":
+                return
             self._save(result="skip", rating="skip", chosen=None)
             self._next()
+            return
+        if self.phase == "feedback" and self.record:
+            if self.record.get("result") == result:
+                return
+            when = self.record["state_after"].last_review_at or now_local()
+            payload = self.service.refile_placement(self.record["log_id"], self.current, result, self.record["state_before"], when)
+            payload["chosen"] = self.record.get("chosen")
+            self.record = payload
+            self.current["result"] = payload["result"]
+            self._render()
+            return
+        if self.phase != "ask":
             return
         rating = RATING_MASTERED if result == "mastered" else RATING_AGAIN
         self._save(result=result, rating=rating, chosen=None)
@@ -342,6 +434,7 @@ class StudyWidget(QWidget):
         self.current["result"] = payload["result"]
 
     def _next(self) -> None:
+        self.sentence_player.stop()
         self.record = None
         self.phase = "ask"
         self.index += 1
@@ -448,10 +541,10 @@ class StudyWidget(QWidget):
         if text.lower() == "f" and mode == "card" and self.phase == "rate":
             self._rate(RATING_MASTERED)
             return
-        if text.lower() == "s" and mode == "placement" and self.phase == "ask":
+        if text.lower() == "s" and mode == "placement" and self.phase in {"ask", "feedback"}:
             self._placement("unknown")
             return
-        if text.lower() == "f" and mode == "placement" and self.phase == "ask":
+        if text.lower() == "f" and mode == "placement" and self.phase in {"ask", "feedback"}:
             self._placement("mastered")
             return
         super().keyPressEvent(event)

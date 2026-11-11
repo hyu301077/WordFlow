@@ -61,6 +61,28 @@ def test_listen_page_lists_folder_and_keeps_rate(tmp_path: Path):
     assert abs(page.player.rate - 0.75) < 0.001
     page._set_rate(2)
     assert abs(page.player.rate - 2) < 0.001
+    sentence = "What if I told you there was something that you can do right now?"
+    (folder / "index.json").write_text(
+        json.dumps([{"id": "001", "text": sentence, "duration": 2.5}], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    page.scan(folder)
+    page.play_row(0)
+    assert page.sentence.text() == sentence
+    assert page.model.data(page.model.index(0, 1)) == sentence
+    page.loop.setChecked(True)
+    assert page.loop.isChecked()
+    assert not page.auto_next.isChecked()
+    assert ctx.settings.get("listen_loop") == "1"
+    calls = []
+    page.player.replay = lambda: calls.append("replay") or True
+    page._finished()
+    assert calls == ["replay"]
+    assert page.current == 0
+    page.loop.setChecked(False)
+    page.auto_next.setChecked(True)
+    page._finished()
+    assert page.current == 1
     ctx.close()
 
 

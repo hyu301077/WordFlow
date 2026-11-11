@@ -973,6 +973,49 @@ class Store:
                     wrong=(1 if correct_flag == 0 else 0) - (1 if old == 0 else 0),
                 )
 
+    def replace_placement_answer(
+        self,
+        *,
+        log_id: int,
+        item_id: int,
+        word_id: int,
+        result: str,
+        rating: str,
+        state_after: MemoryState,
+        correct_flag: int | None,
+    ) -> None:
+        with self._guard():
+            previous = self._one("SELECT * FROM review_logs WHERE id = ?", (log_id,))
+            if not previous:
+                return
+            self.save_state(word_id, state_after)
+            self.conn.execute(
+                """
+                UPDATE review_logs
+                SET rating = ?, correct = ?, ease_after = ?, interval_after = ?, next_review_at = ?
+                WHERE id = ?
+                """,
+                (
+                    rating,
+                    correct_flag,
+                    state_after.ease,
+                    state_after.interval_days,
+                    to_iso(state_after.next_review_at),
+                    log_id,
+                ),
+            )
+            self.conn.execute(
+                "UPDATE session_items SET result = ?, rating = ? WHERE id = ?",
+                (result, rating, item_id),
+            )
+            old = previous["correct"]
+            correct_delta = 0
+            wrong_delta = 0
+            if previous["day"] == today_str() and old != correct_flag:
+                correct_delta = (1 if correct_flag == 1 else 0) - (1 if old == 1 else 0)
+                wrong_delta = (1 if correct_flag == 0 else 0) - (1 if old == 0 else 0)
+            self._bump_daily(correct=correct_delta, wrong=wrong_delta)
+
     def abandon_session(self, session_id: int) -> None:
         with self._guard():
             self.conn.execute(

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
+from pathlib import Path
+
 _ENGLISH = {
     0x0409: "en-US",
     0x0809: "en-GB",
@@ -66,6 +70,54 @@ class SpeechService:
             return True, ""
         except Exception as exc:
             return False, f"朗读失败：{exc}"
+
+    def synthesize(self, text: str) -> tuple[Path | None, str]:
+        """把句子写成 WAV，供播放器按 1 倍或 0.75 倍播放。"""
+        content = (text or "").strip()
+        if not content:
+            return None, "没有可朗读的内容"
+        content = content[:500]
+        if not self.available or self._voice is None:
+            return None, self.error or _NO_ENGINE
+        if not self.english_voices():
+            return None, self.error or _NO_ENGLISH
+        handle, name = tempfile.mkstemp(prefix="wordflow-tts-", suffix=".wav")
+        os.close(handle)
+        path = Path(name)
+        stream = None
+        output = None
+        try:
+            import win32com.client
+
+            self._apply_voice()
+            output = self._voice.AudioOutput
+            stream = win32com.client.Dispatch("SAPI.SpFileStream")
+            stream.Open(str(path), 3, False)
+            self._voice.AudioOutputStream = stream
+            self._voice.Speak(content, 0)
+            return path, ""
+        except Exception as exc:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return None, f"朗读失败：{exc}"
+        finally:
+            if stream is not None:
+                try:
+                    stream.Close()
+                except Exception:
+                    pass
+            if output is not None and self._voice is not None:
+                try:
+                    self._voice.AudioOutput = output
+                except Exception:
+                    pass
+            if self._voice is not None:
+                try:
+                    self._apply_voice()
+                except Exception:
+                    pass
 
     def _load_voices(self) -> None:
         tokens = self._voice.GetVoices()

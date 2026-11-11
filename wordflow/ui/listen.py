@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QAbstractTableModel, Qt
+from PySide6.QtCore import QAbstractTableModel, QSize, Qt, QTimer
+from PySide6.QtGui import QTextDocument
 from PySide6.QtMultimedia import QMediaDevices
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -17,6 +18,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QSlider,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -27,6 +30,33 @@ from wordflow.playback import ClipPlayer, device_key
 from wordflow.ui.common import page_header
 
 RATES = (0.5, 0.75, 1.0, 1.5, 2.0)
+
+
+class SentenceDelegate(QStyledItemDelegate):
+    """句子列按单元格宽度换行，不省略后面的单词。"""
+
+    def initStyleOption(self, option, index) -> None:
+        super().initStyleOption(option, index)
+        option.textElideMode = Qt.ElideNone
+        option.features |= QStyleOptionViewItem.ViewItemFeature.WrapText
+
+    def sizeHint(self, option, index) -> QSize:
+        self.initStyleOption(option, index)
+        text = option.text or ""
+        if not text:
+            return super().sizeHint(option, index)
+        width = 240
+        view = self.parent()
+        if isinstance(view, QTableView):
+            column_width = view.columnWidth(index.column())
+            if column_width > 40:
+                width = column_width
+        width = max(40, width - 16)
+        document = QTextDocument()
+        document.setDefaultFont(option.font)
+        document.setPlainText(text)
+        document.setTextWidth(width)
+        return QSize(int(width), int(document.size().height()) + 12)
 
 
 class ClipModel(QAbstractTableModel):
@@ -77,7 +107,7 @@ class ListenPage(QWidget):
         self._restored = False
         self._advancing = False
         layout = QVBoxLayout(self)
-        layout.addWidget(page_header("语音朗读", "选择一个文件夹，列出里面的全部 MP3。点某一行即可播放。听不到声音时，把播放设备改成正在使用的扬声器或耳机。"))
+        layout.addWidget(page_header("语音朗读", "选择一个文件夹，列出里面的全部 MP3。点某一行即可播放。可以循环当前这一条。句子会完整显示，不省略后面的单词。听不到声音时，把播放设备改成正在使用的扬声器或耳机。"))
         picker = QHBoxLayout()
         self.folder_edit = QLineEdit()
         self.folder_edit.setReadOnly(True)
@@ -122,16 +152,28 @@ class ListenPage(QWidget):
         stop.clicked.connect(self._stop)
         self.auto_next = QCheckBox("播完继续下一句")
         self.auto_next.setChecked(True)
+        self.auto_next.toggled.connect(self._auto_toggled)
+        self.loop = QCheckBox("循环当前")
+        self.loop.toggled.connect(self._loop_toggled)
         transport.addWidget(previous)
         transport.addWidget(self.play_button)
         transport.addWidget(next_button)
         transport.addWidget(stop)
         transport.addWidget(self.auto_next)
+        transport.addWidget(self.loop)
         transport.addStretch(1)
         layout.addLayout(transport)
         self.now = QLabel("还没有开始朗读。")
         self.now.setWordWrap(True)
         layout.addWidget(self.now)
+        self.sentence = QLabel("选择一行后，这里显示完整英文句子。")
+        self.sentence.setObjectName("listenSentence")
+        self.sentence.setWordWrap(True)
+        self.sentence.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        sentence_font = self.sentence.font()
+        sentence_font.setPointSize(sentence_font.pointSize() + 3)
+        self.sentence.setFont(sentence_font)
+        layout.addWidget(self.sentence)
         progress = QHBoxLayout()
         self.elapsed = QLabel("0:00")
         self.slider = QSlider(Qt.Horizontal)
@@ -149,10 +191,16 @@ class ListenPage(QWidget):
         self.view.setSelectionBehavior(QTableView.SelectRows)
         self.view.setSelectionMode(QTableView.SingleSelection)
         self.view.setWordWrap(True)
+        self.view.setTextElideMode(Qt.ElideNone)
+        self.view.setItemDelegateForColumn(1, SentenceDelegate(self.view))
         self.view.verticalHeader().setVisible(False)
-        self.view.horizontalHeader().setStretchLastSection(True)
-        self.view.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        header = self.view.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.view.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.sectionResized.connect(lambda *_args: self.view.resizeRowsToContents())
         self.view.clicked.connect(self._clicked)
         self.view.setMinimumHeight(180)
         layout.addWidget(self.view, 1)
@@ -164,6 +212,18 @@ class ListenPage(QWidget):
         self.player.finished.connect(self._finished)
         self._fill_devices()
         self._restore_rate()
+        if self.ctx.settings.flag("listen_loop"):
+            self.loop.setChecked(True)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        text = self.sentence.text()
+        width = self.sentence.width()
+        if width < 80 or not text:
+            return
+        height = self.sentence.heightForWidth(width)
+        if height > 0 and abs(self.sentence.minimumHeight() - height) > 2:
+            self.sentence.setMinimumHeight(height)
 
     def on_show(self) -> None:
         self._fill_devices()
@@ -197,6 +257,8 @@ class ListenPage(QWidget):
         else:
             self.status.setText("这个文件夹里没有找到 MP3。")
         self.now.setText("还没有开始朗读。")
+        self._show_sentence("选择一行后，这里显示完整英文句子。")
+        QTimer.singleShot(0, self.view.resizeRowsToContents)
 
     def _clicked(self, index) -> None:
         if index.isValid():
@@ -211,9 +273,10 @@ class ListenPage(QWidget):
         self.view.scrollTo(self.model.index(row, 0))
         self._apply_rate()
         self.player.play_file(str(item["path"]))
-        text = item.get("text") or item["name"]
+        text = (item.get("text") or "").strip()
         device_name = self.device.currentText() or "默认设备"
-        self.now.setText(f"正在用「{device_name}」朗读：{item['name']}  {text}")
+        self.now.setText(f"正在用「{device_name}」朗读：{item['name']}")
+        self._show_sentence(text or "这个音频没有配套英文句子。")
 
     def _toggle(self) -> None:
         if self.player._playing:
@@ -244,6 +307,29 @@ class ListenPage(QWidget):
     def _stop(self) -> None:
         self.player.stop()
         self.play_button.setText("播放")
+
+    def _show_sentence(self, text: str) -> None:
+        self.sentence.setText(text)
+        width = self.sentence.width()
+        if width < 80:
+            return
+        height = self.sentence.heightForWidth(width)
+        if height > 0:
+            self.sentence.setMinimumHeight(height)
+
+    def _loop_toggled(self, checked: bool) -> None:
+        self.ctx.settings.set("listen_loop", "1" if checked else "0")
+        if checked and self.auto_next.isChecked():
+            self.auto_next.blockSignals(True)
+            self.auto_next.setChecked(False)
+            self.auto_next.blockSignals(False)
+
+    def _auto_toggled(self, checked: bool) -> None:
+        if checked and self.loop.isChecked():
+            self.loop.blockSignals(True)
+            self.loop.setChecked(False)
+            self.loop.blockSignals(False)
+            self.ctx.settings.set("listen_loop", "0")
 
     def _set_rate(self, rate: float) -> None:
         self.rate = rate
@@ -299,6 +385,11 @@ class ListenPage(QWidget):
         self.play_button.setText("暂停" if state == "playing" else "播放")
 
     def _finished(self) -> None:
+        if self.loop.isChecked() and 0 <= self.current < len(self.model.rows):
+            if self.player.replay():
+                return
+            self.play_row(self.current)
+            return
         if self.auto_next.isChecked() and not self._advancing:
             self._advancing = True
             try:

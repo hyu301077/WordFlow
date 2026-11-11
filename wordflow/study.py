@@ -160,6 +160,23 @@ class StudyService:
         flag = 0 if rating == RATING_AGAIN else 1
         self.store.amend_answer(log_id, word_id, after, rating, flag)
 
+    def refile_placement(self, log_id: int, item: dict, result: str, state_before, when: datetime) -> dict:
+        if result not in {"unknown", "mastered"}:
+            raise ValueError("无效的摸底结果")
+        after = apply_placement(state_before, result, when)
+        rating = _PLACEMENT_RATING[result]
+        correct_flag = 0 if result == "unknown" else None
+        self.store.replace_placement_answer(
+            log_id=log_id,
+            item_id=item["id"],
+            word_id=item["word_id"],
+            result=result,
+            rating=rating,
+            state_after=after,
+            correct_flag=correct_flag,
+        )
+        return {"log_id": log_id, "state_before": state_before, "state_after": after, "rating": rating, "result": result}
+
     def undo_last(self) -> dict | None:
         return self.store.undo_last_review()
 
@@ -239,6 +256,17 @@ class StudyService:
                 message = f"有 {skipped} 个单词因缺少可靠释义被跳过，没有编造选项。"
         return {"session_id": session_id, "queued": len(items), "skipped": skipped, "message": message}
 
+    def _answer_forms(self, word_id: int) -> list[str]:
+        forms: list[str] = []
+        word = self.store.get_word(word_id)
+        if word:
+            forms.append(word["lemma"])
+            display = str(word.get("display") or "").strip()
+            if display:
+                forms.append(display)
+        forms.extend(str(row["surface"]) for row in self.store.sources_of(word_id))
+        return forms
+
     def _make(self, word_id: int, mode: str, document_id: int | None) -> Question | None:
         senses = self.store.senses_of(word_id)
         examples = self.store.examples_of(word_id, document_id)
@@ -252,9 +280,9 @@ class StudyService:
                 return None
             return Question(word_id=word_id, sense_id=None, pos="", correct=lemma, options=[], example=blank)
         if mode == "listen":
-            return self.quiz.build(word_id=word_id, senses=senses, example=example)
+            return self.quiz.build(word_id=word_id, senses=senses, example=example, forms=self._answer_forms(word_id))
         if mode in {"quiz", "placement"}:
-            return self.quiz.build(word_id=word_id, senses=senses, example=example)
+            return self.quiz.build(word_id=word_id, senses=senses, example=example, forms=self._answer_forms(word_id))
         primary = next((sense for sense in senses if sense.get("is_primary")), senses[0] if senses else None)
         gloss = short_gloss(primary["gloss_zh"]) if primary else None
         if mode == "spell" and not gloss:

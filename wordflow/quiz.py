@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
+from wordflow.context_pos import guess_pos, pos_matches
 from wordflow.dictionary import _parse_translation, normalize_pos
 from wordflow.gloss import conflicts, forbidden_norms, norm_gloss, short_gloss
 
@@ -23,7 +24,14 @@ class QuizBuilder:
     def __init__(self, dictionary):
         self.dictionary = dictionary
 
-    def build(self, *, word_id: int, senses: list[dict], example: str | None) -> Question | None:
+    def build(
+        self,
+        *,
+        word_id: int,
+        senses: list[dict],
+        example: str | None,
+        forms: list[str] | None = None,
+    ) -> Question | None:
         usable = []
         for sense in senses:
             gloss = short_gloss(sense.get("gloss_zh"))
@@ -31,10 +39,7 @@ class QuizBuilder:
                 usable.append((sense, gloss))
         if not usable:
             return None
-        primary_sense, correct = next(
-            ((sense, gloss) for sense, gloss in usable if sense.get("is_primary")),
-            usable[0],
-        )
+        primary_sense, correct = _sense_for_sentence(usable, example, forms or [])
         blocked = forbidden_norms([sense.get("gloss_zh") or "" for sense in senses])
         blocked.add(norm_gloss(correct))
         distractors = self._distractors(primary_sense.get("pos") or "", blocked, correct)
@@ -82,3 +87,16 @@ class QuizBuilder:
                         if len(found) >= 3:
                             return found
         return found
+
+
+def _sense_for_sentence(usable: list[tuple[dict, str]], example: str | None, forms: list[str]) -> tuple[dict, str]:
+    primary = next(((sense, gloss) for sense, gloss in usable if sense.get("is_primary")), usable[0])
+    if not example or not forms:
+        return primary
+    guessed = guess_pos(example, forms)
+    if not guessed:
+        return primary
+    for sense, gloss in usable:
+        if pos_matches(sense.get("pos") or "", guessed):
+            return sense, gloss
+    return primary

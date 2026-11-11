@@ -218,6 +218,15 @@ class ClipPlayer(QObject):
         self.cursor = min(limit, max(0.0, milliseconds / 1000 * self.source_rate))
         self.ended = False
 
+    def replay(self) -> bool:
+        """从头再放当前已经解开的音频，不再重新解码。"""
+        if not self.samples:
+            return False
+        self.seek(0)
+        self._open_sink()
+        self.positionChanged.emit(0)
+        return self._playing
+
     def render(self, maxlen: int) -> bytes:
         fmt = self.out_format
         if fmt is None or maxlen <= 0 or not self.samples or self.ended:

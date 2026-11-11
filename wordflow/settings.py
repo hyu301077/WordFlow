@@ -32,6 +32,8 @@ DEFAULTS: dict[str, str] = {
     "listen_folder": "",
     "listen_device": "",
     "listen_rate": "1",
+    "listen_loop": "0",
+    "placement_sentence_rate": "1",
     "desired_retention": "0.90",
     "leech_threshold": "8",
 }
