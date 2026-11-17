@@ -166,6 +166,10 @@ class MainWindow(QMainWindow):
         if refresher:
             refresher()
 
+    def open_listen(self, folder) -> None:
+        self.pages["listen"].open_folder(folder)
+        self.go("listen")
+
     def open_reader(self, document_id: int) -> None:
         self.pages["reader"].load(document_id)
         self.go("reader")
@@ -203,6 +207,9 @@ class MainWindow(QMainWindow):
             self.tray.showMessage("WordFlow", f"今天有 {data['due_total']} 个单词到了复习时间。", QSystemTrayIcon.Information, 4000)
 
     def closeEvent(self, event) -> None:
+        if self.pages["assistant"].cancel_talk_on_close():
+            event.ignore()
+            return
         self.ctx.settings.set("window_width", self.width())
         self.ctx.settings.set("window_height", self.height())
         for page in self.pages.values():

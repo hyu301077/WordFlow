@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -24,7 +29,8 @@ from wordflow.ai import (
     plan_prompt,
     reading_prompt,
 )
-from wordflow.ui.common import page_header, tell
+from wordflow.talk_clips import TalkResult, build_talk
+from wordflow.ui.common import card, page_header, tell
 from wordflow.ui.workers import CallWorker
 
 
@@ -35,6 +41,8 @@ class AssistantPage(QWidget):
         self.navigator = navigator
         self.worker: CallWorker | None = None
         self.pending: dict | None = None
+        self.talk_folder: Path | None = None
+        self.close_after_talk = False
         layout = QVBoxLayout(self)
         layout.addWidget(
             page_header(
@@ -64,6 +72,7 @@ class AssistantPage(QWidget):
         ping = QPushButton("测试连接")
         ping.clicked.connect(lambda: self._run("ping"))
         layout.addWidget(ping)
+        layout.addWidget(self._talk_card())
         form = QHBoxLayout()
         self.lemma = QLineEdit()
         self.lemma.setPlaceholderText("单词")
@@ -96,6 +105,51 @@ class AssistantPage(QWidget):
         layout.addWidget(self.history, 1)
         self.records: list[dict] = []
 
+    def _talk_card(self) -> QWidget:
+        frame, body = card()
+        body.addWidget(page_header("视频文案", "在本机识别英语音视频，按完整句子剪出 MP3，并生成英文稿。"))
+        self.talk_path = QLineEdit()
+        self.talk_path.setReadOnly(True)
+        self.talk_path.setAccessibleName("所选音视频文件")
+        self.talk_path.setPlaceholderText("还没有选择文件")
+        pick = QPushButton("选择音视频")
+        pick.clicked.connect(self._pick_talk)
+        path_row = QHBoxLayout()
+        path_row.addWidget(pick)
+        path_row.addWidget(self.talk_path, 1)
+        body.addLayout(path_row)
+        self.talk_name = QLineEdit()
+        self.talk_name.setAccessibleName("结果文件夹名称")
+        self.talk_name.setPlaceholderText("结果文件夹名称，可以留空")
+        self.talk_model = QComboBox()
+        self.talk_model.setAccessibleName("英文识别模型")
+        self.talk_model.addItem("小模型，较快", "small")
+        self.talk_model.addItem("中模型，更准", "medium")
+        name_row = QHBoxLayout()
+        name_row.addWidget(self.talk_name, 1)
+        name_row.addWidget(self.talk_model)
+        body.addLayout(name_row)
+        self.talk_translate = QCheckBox("将本次识别出的英文发给已配置的在线助手生成中文参考译文")
+        body.addWidget(self.talk_translate)
+        self.talk_start = QPushButton("开始整理")
+        self.talk_start.clicked.connect(self._start_talk)
+        self.talk_cancel = QPushButton("取消")
+        self.talk_cancel.clicked.connect(self._cancel_talk)
+        self.talk_open = QPushButton("打开结果")
+        self.talk_open.clicked.connect(self._open_talk_folder)
+        self.talk_listen = QPushButton("送到语音朗读")
+        self.talk_listen.clicked.connect(self._open_talk_listen)
+        actions = QHBoxLayout()
+        for button in (self.talk_start, self.talk_cancel, self.talk_open, self.talk_listen):
+            button.setEnabled(False)
+            actions.addWidget(button)
+        body.addLayout(actions)
+        self.talk_status = QLabel("首次识别需联网下载模型。")
+        self.talk_status.setObjectName("muted")
+        self.talk_status.setWordWrap(True)
+        body.addWidget(self.talk_status)
+        return frame
+
     def on_show(self) -> None:
         self.enabled.blockSignals(True)
         self.consent.blockSignals(True)
@@ -106,6 +160,8 @@ class AssistantPage(QWidget):
         self.base_url.setText(self.ctx.settings.get("ai_base_url", ""))
         self.model.setText(self.ctx.settings.get("ai_model", ""))
         self.api_key.setText(self.ctx.settings.get("ai_api_key", ""))
+        index = self.talk_model.findData(self.ctx.settings.get("talk_model", "small"))
+        self.talk_model.setCurrentIndex(max(index, 0))
         self._reload_history()
 
     def _save_flags(self) -> None:
@@ -118,7 +174,7 @@ class AssistantPage(QWidget):
         self.ctx.settings.set("ai_api_key", self.api_key.text().strip())
 
     def _run(self, kind: str) -> None:
-        if self.worker and self.worker.isRunning():
+        if self.talk_cancel.isEnabled() or (self.worker and self.worker.isRunning()):
             tell(self, "上一个请求还没结束。", "warn")
             return
         self._save_flags()
@@ -203,6 +259,105 @@ class AssistantPage(QWidget):
                 return entry.senses[0].gloss_zh
         return ""
 
+    def _pick_talk(self) -> None:
+        chosen, _filter = QFileDialog.getOpenFileName(
+            self,
+            "选择英语视频或音频",
+            self.talk_path.text() or str(Path.home()),
+            "视频和音频 (*.mp4 *.mkv *.mov *.webm *.mp3 *.wav *.m4a *.aac *.flac);;所有文件 (*.*)",
+        )
+        if chosen:
+            self.talk_path.setText(chosen)
+            self.talk_start.setEnabled(not self.talk_cancel.isEnabled())
+
+    def _start_talk(self) -> None:
+        if self.worker and self.worker.isRunning():
+            tell(self, "上一个请求还没结束。", "warn")
+            return
+        source = Path(self.talk_path.text())
+        folder_name = self.talk_name.text().strip()
+        model_size = self.talk_model.currentData()
+        client = None
+        if self.talk_translate.isChecked():
+            self._save_flags()
+            self._save_connection()
+            try:
+                client = client_from_settings(self.ctx.settings)
+            except AIError as exc:
+                self.talk_status.setText(str(exc))
+                return
+        self.ctx.settings.set("talk_model", model_size)
+        self.talk_translate.setChecked(False)
+        self.pending = {"kind": "talk", "preview": str(source), "model": client.model if client else "local"}
+        self.talk_start.setEnabled(False)
+        self.talk_cancel.setEnabled(True)
+        self.talk_status.setText("正在整理音视频。")
+        data_dir = self.ctx.data_dir
+
+        def job(worker):
+            return build_talk(
+                source, data_dir / "talks", folder_name, model_size, data_dir / "models",
+                client=client,
+                progress=lambda message: worker.progress.emit(0, 0, message),
+                cancelled=worker.cancelled,
+            )
+
+        self.worker = CallWorker(job, self)
+        self.worker.progress.connect(self._talk_progress)
+        self.worker.succeeded.connect(self._talk_done)
+        self.worker.failed.connect(self.talk_status.setText)
+        self.worker.finished.connect(self._talk_finished)
+        self.worker.start()
+
+    def _talk_progress(self, _done: int, _total: int, message: str) -> None:
+        if not self.worker.cancelled():
+            self.talk_status.setText(message)
+
+    def _cancel_talk(self) -> None:
+        self.worker.cancel()
+        self.talk_status.setText("正在取消，当前处理步骤结束后停止。")
+
+    def cancel_talk_on_close(self) -> bool:
+        if self.talk_cancel.isEnabled():
+            self.close_after_talk = True
+            self._cancel_talk()
+        return self.close_after_talk
+
+    def _talk_finished(self) -> None:
+        self.talk_cancel.setEnabled(False)
+        self.talk_start.setEnabled(True)
+        if self.close_after_talk:
+            self.close_after_talk = False
+            self.navigator.close()
+
+    def _talk_done(self, result: TalkResult) -> None:
+        self.talk_folder = result.folder
+        self.talk_open.setEnabled(True)
+        self.talk_listen.setEnabled(True)
+        chinese = "已生成参考译文" if result.translated else "中文标为「待补充」"
+        summary = f"已生成 {result.clips} 段 MP3，合并 {result.merged} 段短片段。{chinese}。\n{result.folder}"
+        if result.warning:
+            summary += f"\n{result.warning}"
+        self.talk_status.setText(summary)
+        self.ctx.store.add_ai_record(
+            kind="talk", title=result.folder.name, preview=self.pending["preview"],
+            content=summary, model=self.pending["model"] if result.translated else "local",
+        )
+        self._reload_history()
+
+    def _open_talk_folder(self) -> None:
+        try:
+            os.startfile(self.talk_folder)
+        except OSError as exc:
+            tell(self, f"无法打开结果文件夹。{exc}", "warn")
+
+    def _open_talk_listen(self) -> None:
+        folder = self.talk_folder / "sentences_by_sentence"
+        if folder.is_dir():
+            self.navigator.open_listen(folder)
+        else:
+            tell(self, "结果文件夹已移动或删除。", "warn")
+
     def _done(self, text: str) -> None:
         prepared = self.pending or {}
         notice = "以下内容由在线模型生成，只供参考，没有写入释义，也不会作为测验答案。\n\n"
@@ -233,6 +388,9 @@ class AssistantPage(QWidget):
         if row < 0 or row >= len(self.records):
             return
         record = self.records[row]
+        if record["kind"] == "talk":
+            self.output.setPlainText(record["content"])
+            return
         self.output.setPlainText(
             "以下内容由在线模型生成，只供参考，没有写入释义，也不会作为测验答案。\n\n" + record["content"]
         )

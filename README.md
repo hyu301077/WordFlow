@@ -4,6 +4,8 @@
 
 安装、启动和打包见 [使用说明.md](使用说明.md)。
 
+按英文句子剪 MP3 的工作流见 [TED 视频剪辑 Skill](skill/ted-video-to-sentence-clips/SKILL.md)。
+
 可执行程序：`dist\WordFlow\WordFlow.exe`
 
 旁边的「英语学习」目录保留原来的 TED 文稿。在「导入文档」中直接选择 `talks` 里各主题 `output` 下的文稿文件。

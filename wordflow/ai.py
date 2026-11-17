@@ -22,7 +22,7 @@ class AIClient:
     model: str
     timeout: int = 60
 
-    def complete(self, system: str, user: str) -> str:
+    def complete(self, system: str, user: str, *, timeout: int | None = None) -> str:
         url = self.base_url.rstrip("/") + "/chat/completions"
         payload = {
             "model": self.model,
@@ -37,7 +37,7 @@ class AIClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
         request = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.urlopen(request, timeout=self.timeout if timeout is None else timeout) as response:
                 raw = response.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:500]

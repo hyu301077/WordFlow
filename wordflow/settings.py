@@ -34,6 +34,7 @@ DEFAULTS: dict[str, str] = {
     "listen_rate": "1",
     "listen_loop": "0",
     "placement_sentence_rate": "1",
+    "talk_model": "small",
     "desired_retention": "0.90",
     "leech_threshold": "8",
 }

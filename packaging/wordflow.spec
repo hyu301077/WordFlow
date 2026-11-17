@@ -29,7 +29,20 @@ hidden = [
 dictionary = root / "data" / "ecdict.db"
 if dictionary.is_file():
     datas.append((str(dictionary), "data"))
-for package in ("pypdfium2", "pypdfium2_raw", "winrt", "PIL", "fsrs"):
+for package in (
+    "pypdfium2",
+    "pypdfium2_raw",
+    "winrt",
+    "PIL",
+    "fsrs",
+    "faster_whisper",
+    "ctranslate2",
+    "imageio_ffmpeg",
+    "av",
+    "onnxruntime",
+    "tokenizers",
+    "huggingface_hub",
+):
     package_datas, package_binaries, package_hidden = collect_all(package)
     datas += package_datas
     binaries += package_binaries

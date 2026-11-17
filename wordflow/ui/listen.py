@@ -237,10 +237,14 @@ class ListenPage(QWidget):
     def _choose(self) -> None:
         start = self.folder_edit.text().strip() or str(Path.home())
         chosen = QFileDialog.getExistingDirectory(self, "选择要检索的文件夹", start)
-        if not chosen:
-            return
-        self.ctx.settings.set("listen_folder", chosen)
-        self.scan(Path(chosen))
+        if chosen:
+            self.open_folder(Path(chosen))
+
+    def open_folder(self, folder: Path) -> None:
+        self._restored = True
+        self.ctx.settings.set("listen_folder", str(folder))
+        self._stop()
+        self.scan(folder)
 
     def _refresh(self) -> None:
         if self.folder:
