@@ -22,6 +22,11 @@ def test_split_keeps_titles_and_short_utterances():
     assert split_sentences("She lived in the U.S. for years.") == ["She lived in the U.S. for years."]
 
 
+def test_split_after_closing_quotes_keeps_the_reporting_clause():
+    text = 'She said, "We can go now." Then he shouted, “Wait!” she recalled.'
+    assert split_sentences(text) == ['She said, "We can go now."', "Then he shouted, “Wait!” she recalled."]
+
+
 def test_align_sentences_uses_word_times():
     words = [
         TimedWord("Hello", 0.2, 0.6),
@@ -57,6 +62,20 @@ def test_merge_stops_when_only_one_clip_remains():
     assert merged[0].text == "Hi. No. Yes."
     assert merged[0].start == 0
     assert merged[0].end == 1.1
+
+
+def test_merge_finishes_all_short_spans_in_a_long_recording():
+    spans = []
+    for index in range(45):
+        start = index * 7
+        spans.extend([
+            Span(start, start + 6, "This is one complete sentence."),
+            Span(start + 6, start + 7, "Yes!"),
+        ])
+    merged, removed = merge_short_spans(spans)
+    assert removed == 45
+    assert all(span.duration >= 4 and len(span.text.split()) > 3 for span in merged)
+    assert " ".join(span.text for span in merged) == " ".join(span.text for span in spans)
 
 
 def test_equal_neighbors_prefer_the_previous_clip():
@@ -109,6 +128,36 @@ def test_export_mp3_cuts_a_wav(tmp_path: Path):
     output = tmp_path / "clips" / "001.mp3"
     assert output.is_file()
     assert output.stat().st_size > 100
+
+
+def test_missing_word_timestamps_keep_complete_sentences_and_actual_audio(tmp_path, monkeypatch):
+    from wordflow import talk_clips
+
+    wav = tmp_path / "source.wav"
+    with wave.open(str(wav), "wb") as handle:
+        handle.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        handle.writeframes(b"\0\0" * 16000 * 16)
+    segments = [
+        Segment("Here are the opening words.", 0, 5),
+        Segment("They continue across", 5, 7),
+        Segment("two segments. We finish the last sentence.", 7, 15),
+    ]
+    timed = [
+        TimedWord("They", 5, 5.3), TimedWord("continue", 5.3, 6), TimedWord("across", 6, 7),
+        TimedWord("two", 7, 8), TimedWord("segments.", 8, 10),
+        TimedWord("We", 10, 11), TimedWord("finish", 11, 12), TimedWord("the", 12, 13),
+        TimedWord("last", 13, 14), TimedWord("sentence.", 14, 15),
+    ]
+    monkeypatch.setattr(talk_clips, "transcribe_wav", lambda *args: (segments, timed))
+    result = talk_clips.build_talk(wav, tmp_path / "out", "lesson", "small", tmp_path / "models")
+    clips = result.folder / "sentences_by_sentence"
+    index = json.loads((clips / "index.json").read_text(encoding="utf-8"))
+    assert [row["text"] for row in index] == [
+        "Here are the opening words.", "They continue across two segments.", "We finish the last sentence.",
+    ]
+    assert [row["start"] for row in index] == [0, 5, 10]
+    for row in index:
+        assert abs(talk_clips.media_duration(clips / row["file"]) - row["duration"]) < 0.15
 
 
 def test_paragraphs_break_on_a_pause():

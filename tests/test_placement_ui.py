@@ -84,6 +84,43 @@ def _extra_labels(widget) -> list[str]:
     return labels
 
 
+def test_spelling_hides_the_answer_until_submission_and_ignores_arrow_keys(tmp_path, monkeypatch):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+    from wordflow.context import AppContext
+    from wordflow.ui.study_widget import StudyWidget
+
+    monkeypatch.setenv("WORDFLOW_DATA", str(tmp_path / "data"))
+    app = QApplication.instance() or QApplication([])
+    dictionary = tmp_path / "dict.db"
+    write_dictionary(dictionary)
+    ctx = AppContext(db_path=tmp_path / "app.db", dict_path=dictionary)
+    ctx.settings.set("auto_speak", "0")
+    word_id = ctx.store.ensure_word("apple", "apple", ctx.dictionary.lookup("apple"))
+    item = {"word_id": word_id, "correct": "苹果", "example": "I ate an apple."}
+    session = ctx.store.create_session("learn", "spell", None, None, [item])
+    widget = StudyWidget(ctx, session)
+    widget.show()
+    app.processEvents()
+    assert widget.word.text() == "拼写"
+    assert widget.prompt.text() == "苹果"
+    assert all(not label.text() for label in (widget.example, widget.phonetic, widget.phrases))
+    widget.spell.setText("aple")
+    QTest.keyClick(widget.spell, Qt.Key_Return)
+    assert widget.word.text() == "apple"
+    assert "正确拼写：apple" in widget.feedback.text()
+    widget.close()
+    session = ctx.store.create_session("learn", "card", None, None, [item])
+    card = StudyWidget(ctx, session)
+    card._reveal_card()
+    QTest.keyClick(card, Qt.Key_Left)
+    assert card.phase == "rate"
+    assert ctx.store.session_items(session)[0]["result"] is None
+    card.close()
+    ctx.close()
+
+
 def test_book_buttons_stay_after_the_answer(tmp_path: Path):
     os.environ["WORDFLOW_DATA"] = str(tmp_path / "data")
     os.environ["QT_QPA_PLATFORM"] = "offscreen"

@@ -6,7 +6,16 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeySequence
-from PySide6.QtWidgets import QButtonGroup, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QButtonGroup,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QProgressBar,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from wordflow.collocation import phrases_in_sentences
 from wordflow.constants import RATING_AGAIN, RATING_GOOD, RATING_HARD, RATING_MASTERED
@@ -59,18 +68,34 @@ class StudyWidget(QWidget):
             self._render()
 
     def _build(self) -> None:
-        outer = QVBoxLayout(self)
+        shell = QVBoxLayout(self)
+        shell.setContentsMargins(0, 6, 0, 0)
+        row = QHBoxLayout()
+        host = QWidget()
+        host.setMaximumWidth(780)
+        outer = QVBoxLayout(host)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(14)
         self.progress = QLabel()
-        self.progress.setObjectName("muted")
+        self.progress.setObjectName("progressLabel")
+        self.progress.setAlignment(Qt.AlignCenter)
         outer.addWidget(self.progress)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setObjectName("studyProgress")
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(8)
+        outer.addWidget(self.progress_bar)
         frame, layout = card()
         frame.setObjectName("wordCard")
+        layout.setContentsMargins(32, 28, 32, 24)
+        layout.setSpacing(12)
         self.word = QLabel()
         self.word.setObjectName("wordTitle")
         self.word.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.word)
         meta = QHBoxLayout()
         self.phonetic = QLabel()
+        self.phonetic.setObjectName("phonetic")
         self.phonetic.setAlignment(Qt.AlignCenter)
         self.speak_button = QPushButton("朗读")
         self.speak_button.clicked.connect(lambda: self._speak(True))
@@ -102,10 +127,12 @@ class StudyWidget(QWidget):
         self.prompt.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.prompt)
         self.answer_box = QLabel()
+        self.answer_box.setObjectName("sense")
         self.answer_box.setWordWrap(True)
         self.answer_box.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.answer_box)
         self.example = QLabel()
+        self.example.setObjectName("exampleLine")
         self.example.setWordWrap(True)
         self.example.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.example)
@@ -120,8 +147,15 @@ class StudyWidget(QWidget):
         layout.addWidget(self.recall)
         self.spell = QLineEdit()
         self.spell.setPlaceholderText("输入英文单词后按 Enter")
+        self.spell.setMinimumWidth(260)
+        self.spell.setMaximumWidth(460)
+        self.spell.setAlignment(Qt.AlignCenter)
         self.spell.returnPressed.connect(self._submit_spelling)
-        layout.addWidget(self.spell)
+        spell_row = QHBoxLayout()
+        spell_row.addStretch(1)
+        spell_row.addWidget(self.spell)
+        spell_row.addStretch(1)
+        layout.addLayout(spell_row)
         self.option_host = QVBoxLayout()
         layout.addLayout(self.option_host)
         self.extra = QHBoxLayout()
@@ -130,11 +164,6 @@ class StudyWidget(QWidget):
         self.feedback.setWordWrap(True)
         self.feedback.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.feedback)
-        outer.addWidget(frame, 1)
-        hint = QLabel("1–4 选择或评分    Space 朗读单词    Enter 确认 / 下一题    Ctrl+Z 撤销上一题    S 不认识    F 加入熟词本    Esc 退出")
-        hint.setObjectName("muted")
-        hint.setAlignment(Qt.AlignCenter)
-        outer.addWidget(hint)
         actions = QHBoxLayout()
         self.reveal_button = QPushButton("显示释义")
         self.reveal_button.clicked.connect(self._reveal_card)
@@ -153,7 +182,19 @@ class StudyWidget(QWidget):
         actions.addWidget(undo)
         actions.addStretch(1)
         actions.addWidget(leave)
-        outer.addLayout(actions)
+        layout.addSpacing(8)
+        layout.addLayout(actions)
+        outer.addWidget(frame)
+        hint = QLabel("1–4 选择或评分    Space 朗读单词    Enter 确认或下一题    Ctrl+Z 撤销    S 不认识    F 加入熟词本    Esc 退出")
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        hint.setAlignment(Qt.AlignCenter)
+        outer.addWidget(hint)
+        row.addStretch(1)
+        row.addWidget(host, 4)
+        row.addStretch(1)
+        shell.addLayout(row)
+        shell.addStretch(1)
         self.sentence_player = ClipPlayer(self)
         self.sentence_player.failed.connect(self._sentence_failed)
         self._restore_sentence_rate()
@@ -172,14 +213,18 @@ class StudyWidget(QWidget):
             item = layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.hide()
                 widget.deleteLater()
 
     def _render(self) -> None:
         item = self.current
         mode = self._mode()
-        hide_word = mode in {"cloze", "listen"} and self.phase == "ask"
+        prompts = {"spell": "拼写", "cloze": "填空", "listen": "听音"}
+        hide_word = mode in prompts and self.phase == "ask"
         self.progress.setText(f"{self.index + 1} / {len(self.items)}")
-        self.word.setText("填空" if mode == "cloze" and hide_word else "听音" if mode == "listen" and hide_word else item["display"] or item["lemma"])
+        self.progress_bar.setMaximum(max(1, len(self.items)))
+        self.progress_bar.setValue(self.index + 1)
+        self.word.setText(prompts[mode] if hide_word else item["display"] or item["lemma"])
         self.phonetic.setText("" if hide_word else format_phonetic(item["phonetic"]))
         placement = mode == "placement"
         self.speak_button.setText("朗读单词" if placement else "朗读")
@@ -188,8 +233,8 @@ class StudyWidget(QWidget):
         for button in self.sentence_rate_buttons.values():
             button.setVisible(placement)
         self.pos_label.setText("" if hide_word else f"词性：{item['prompt_pos']}" if item.get("prompt_pos") else "")
-        self.example.setText("" if mode == "listen" and self.phase == "ask" else item["example"] or "")
-        show_answer = self.phase in {"rate", "feedback"} or (mode == "spell" and self.phase == "feedback")
+        self.example.setText("" if hide_word and mode != "cloze" else item["example"] or "")
+        show_answer = self.phase in {"rate", "feedback"}
         self.answer_box.setText(self._sense_text() if show_answer and mode != "cloze" else item["lemma"] if mode == "cloze" and self.phase == "feedback" else "")
         if mode == "card" and self.phase == "ask":
             self.prompt.setText("先回忆词义，再显示释义。")
@@ -206,7 +251,7 @@ class StudyWidget(QWidget):
         else:
             self.prompt.setText("")
         self.spell.setVisible(mode in {"spell", "cloze"} and self.phase == "ask")
-        if self.spell.isVisible():
+        if not self.spell.isHidden():
             self.spell.clear()
         self.reveal_button.setVisible(mode == "card" and self.phase == "ask")
         self.next_button.setVisible(self.phase == "feedback")
@@ -257,8 +302,11 @@ class StudyWidget(QWidget):
                 self.feedback.setText(f"已加入生词本。正确答案：{gloss}。{scheduled}")
             elif result == "wrong":
                 chosen = self.record.get("chosen") or ""
-                extra = f"你选择了：{chosen}。 " if chosen else ""
-                self.feedback.setText(f"正确答案：{gloss}。{extra}{scheduled}")
+                if mode in {"spell", "cloze"}:
+                    self.feedback.setText(f"正确拼写：{item['lemma']}。你的输入：{chosen or '（空白）'}。{scheduled}")
+                else:
+                    extra = f"你选择了：{chosen}。 " if chosen else ""
+                    self.feedback.setText(f"正确答案：{gloss}。{extra}{scheduled}")
             elif result == "mastered":
                 self.feedback.setText(f"已加入熟词本。{gloss}。{scheduled}")
             else:
@@ -286,6 +334,8 @@ class StudyWidget(QWidget):
         return "\n".join(lines)
 
     def _speak(self, manual: bool) -> None:
+        if self._mode() == "cloze" and self.phase == "ask":
+            return
         self.sentence_player.stop()
         text = self.current["display"] or self.current["lemma"]
         if self._mode() != "placement" and self.phase != "ask" and self.current.get("example"):
@@ -381,6 +431,8 @@ class StudyWidget(QWidget):
             self._render()
 
     def _rate(self, rating: str) -> None:
+        if self.phase != "rate":
+            return
         self._save(result=None, rating=rating, chosen=None)
         self._next()
 
@@ -490,9 +542,9 @@ class StudyWidget(QWidget):
         self.phrases.setText("来自你的文章：" + "；".join(found) if found else "")
 
     def _undo(self) -> None:
-        result = self.service.undo_last()
+        result = self.service.undo_last(self.session["id"])
         if not result:
-            tell(self, "没有可以撤销的作答。", "warn")
+            tell(self, "这场练习没有可撤销的作答，或该词已有更新的学习记录。", "warn")
             return
         self.items = self.ctx.store.session_items(self.session["id"])
         self.session = self.ctx.store.get_session(self.session["id"])
@@ -526,10 +578,10 @@ class StudyWidget(QWidget):
             elif self.phase == "feedback":
                 self._next()
             return
-        if text in "1234" and mode in {"placement", "quiz", "listen"} and self.phase == "ask":
+        if text in {"1", "2", "3", "4"} and mode in {"placement", "quiz", "listen"} and self.phase == "ask":
             self._choose(int(text) - 1)
             return
-        if text in "1234" and mode == "card" and self.phase == "rate":
+        if text in {"1", "2", "3", "4"} and mode == "card" and self.phase == "rate":
             ratings = [RATING_AGAIN, RATING_HARD, RATING_GOOD, RATING_MASTERED]
             if self.session["kind"] == "review":
                 ratings = [item[0] for item in _REVIEW_RATINGS]

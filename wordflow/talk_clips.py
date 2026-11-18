@@ -120,9 +120,7 @@ def build_talk(
     full_text = " ".join(item.text.strip() for item in segments if item.text.strip())
     paragraphs = paragraph_groups(segments)
     sentences = split_sentences(full_text)
-    spans = align_sentences(sentences, words)
-    if not spans:
-        spans = [Span(item.start, item.end, item.text) for item in segments if item.text.strip()]
+    spans = align_sentences(sentences, _clip_timeline(segments, words))
     if not spans:
         raise TalkError("没有从这段音视频里识别出英文。")
     merged, removed = merge_short_spans(spans)
@@ -185,7 +183,8 @@ def split_sentences(text: str) -> list[str]:
         protected = re.sub(rf"\b{re.escape(abbreviation)}\.", abbreviation.replace(".", _PLACEHOLDER) + _PLACEHOLDER, protected)
     protected = re.sub(r"(?<=\d)\.(?=\d)", _PLACEHOLDER, protected)
     protected = re.sub(r"\b([A-Z])\.", rf"\1{_PLACEHOLDER}", protected)
-    parts = re.split(r"(?<=[.!?])\s+", protected)
+    protected = re.sub(r"""([.!?]["'”’)\]]+)\s+(?=[A-Z0-9"'“‘(])""", r"\1\n", protected)
+    parts = re.split(r"(?<=[.!?])\s+|\n", protected)
     return [part.replace(_PLACEHOLDER, ".").strip() for part in parts if part.strip()]
 
 
@@ -207,29 +206,56 @@ def paragraph_groups(segments: list[Segment], gap: float = 1.2) -> list[str]:
     return [" ".join(group) for group in groups]
 
 
+def _clip_timeline(segments: list[Segment], words: list[TimedWord]) -> list[TimedWord]:
+    """保留可核对的逐词时间；局部缺词时只退回该识别段的起止时间。"""
+    timeline = []
+    index = 0
+    for segment in segments:
+        first = index
+        while index < len(words) and (words[index].start + words[index].end) / 2 <= segment.end:
+            index += 1
+        timed = words[first:index]
+        if timed and _norm("".join(word.text for word in timed)) == _norm(segment.text):
+            timeline.extend(timed)
+        else:
+            timeline.append(TimedWord(segment.text, segment.start, segment.end))
+    return timeline
+
+
 def align_sentences(sentences: list[str], words: list[TimedWord], margin: float = 0.08) -> list[Span]:
-    usable = [word for word in words if _norm(word.text)]
-    cursor = 0
+    """只在句末与时间戳同时存在的位置剪切，避免缺词时输出错配的音频。"""
+    if not sentences or not words:
+        return []
+    sentence_text = [_norm(sentence) for sentence in sentences]
+    timed = [(word, _norm(word.text)) for word in words]
+    if "".join(sentence_text) != "".join(token for _, token in timed):
+        return []
+    ends = {}
+    offset = 0
+    for index, text in enumerate(sentence_text):
+        offset += len(text)
+        ends[offset] = index + 1
     spans: list[Span] = []
-    for sentence in sentences:
-        needed = [token for token in (_norm(part) for part in sentence.split()) if token]
-        if not needed:
+    offset = first_sentence = 0
+    start = None
+    for word, token in timed:
+        if not token:
             continue
-        start_index, end_index = _find_span(usable, cursor, needed)
-        if start_index is None:
-            if spans:
-                previous = spans[-1]
-                spans[-1] = Span(previous.start, previous.end, f"{previous.text} {sentence}".strip(), previous.note or "unaligned")
-            continue
-        start = max(0.0, usable[start_index].start - margin)
-        end = usable[end_index].end + margin
-        if spans and start < spans[-1].end:
-            start = spans[-1].end
-        if end <= start:
-            end = start + 0.2
-        spans.append(Span(start, end, sentence))
-        cursor = end_index + 1
-    return spans
+        if start is None:
+            start = word.start
+        offset += len(token)
+        last = ends.get(offset)
+        if last is not None:
+            text = " ".join(sentences[first_sentence:last])
+            spans.append(Span(start, word.end, text))
+            first_sentence = last
+            start = None
+    padded = []
+    for index, span in enumerate(spans):
+        left = (spans[index - 1].end + span.start) / 2 if index else 0.0
+        right = (span.end + spans[index + 1].start) / 2 if index + 1 < len(spans) else span.end + margin
+        padded.append(Span(max(left, span.start - margin), min(right, span.end + margin), span.text))
+    return padded
 
 
 def merge_short_spans(spans: list[Span], word_limit: int = 3, second_limit: float = 4.0) -> tuple[list[Span], int]:
@@ -454,22 +480,19 @@ def _write_docx(path: Path, title: str, blocks: list[str]) -> None:
 
 def _merge_until(spans: list[Span], is_short, stage: str) -> list[Span]:
     current = list(spans)
-    for _pass in range(20):
-        if len(current) <= 1:
-            return current
-        index = next((position for position, span in enumerate(current) if is_short(span)), None)
-        if index is None:
-            return current
-        current = _absorb(current, index, stage)
+    index = 0
+    while len(current) > 1 and index < len(current):
+        if is_short(current[index]):
+            index = _absorb(current, index, stage)
+        else:
+            index += 1
     return current
 
 
-def _absorb(spans: list[Span], index: int, stage: str) -> list[Span]:
+def _absorb(spans: list[Span], index: int, stage: str) -> int:
     span = spans[index]
     previous = spans[index - 1] if index > 0 else None
     following = spans[index + 1] if index + 1 < len(spans) else None
-    if previous is None and following is None:
-        return spans
     if previous is None:
         choice = "next"
     elif following is None:
@@ -479,10 +502,12 @@ def _absorb(spans: list[Span], index: int, stage: str) -> list[Span]:
     if choice == "prev":
         assert previous is not None
         merged = Span(previous.start, span.end, f"{previous.text} {span.text}".strip(), _note(previous.note, span.note, stage))
-        return spans[: index - 1] + [merged] + spans[index + 1 :]
+        spans[index - 1 : index + 1] = [merged]
+        return index - 1
     assert following is not None
     merged = Span(span.start, following.end, f"{span.text} {following.text}".strip(), _note(span.note, following.note, stage))
-    return spans[:index] + [merged] + spans[index + 2 :]
+    spans[index : index + 2] = [merged]
+    return index
 
 
 def _shorter(previous: Span, following: Span, stage: str) -> str:
@@ -513,35 +538,6 @@ def _note(left: str, right: str, stage: str) -> str:
             if part and part not in seen:
                 seen.append(part)
     return "; ".join(seen)
-
-
-def _find_span(words: list[TimedWord], cursor: int, needed: list[str]) -> tuple[int | None, int | None]:
-    limit = min(len(words), cursor + max(40, len(needed) * 4))
-    best: tuple[int, int, int] | None = None
-    for start in range(cursor, limit):
-        if _norm(words[start].text) != needed[0]:
-            continue
-        matched = 0
-        last = start
-        position = start
-        for token in needed:
-            found = None
-            for index in range(position, min(len(words), start + len(needed) + 4)):
-                if _norm(words[index].text) == token:
-                    found = index
-                    break
-            if found is None:
-                break
-            matched += 1
-            last = found
-            position = found + 1
-        if matched == len(needed):
-            return start, last
-        if best is None or matched > best[0]:
-            best = (matched, start, last)
-    if best and best[0] >= max(1, int(len(needed) * 0.6)):
-        return best[1], best[2]
-    return None, None
 
 
 def _norm(text: str) -> str:

@@ -177,8 +177,8 @@ class StudyService:
         )
         return {"log_id": log_id, "state_before": state_before, "state_after": after, "rating": rating, "result": result}
 
-    def undo_last(self) -> dict | None:
-        return self.store.undo_last_review()
+    def undo_last(self, session_id: int | None = None) -> dict | None:
+        return self.store.undo_last_review(session_id)
 
     def abandon(self, session_id: int) -> None:
         self.store.abandon_session(session_id)

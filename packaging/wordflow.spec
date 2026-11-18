@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """WordFlow 的 PyInstaller 配置。词典存在时一并打包，因此输出目录会比较大。"""
 
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all
@@ -61,6 +62,11 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# Qt on Windows imports the Windows ICU ABI. A third-party icuuc.dll with
+# version-suffixed exports can shadow the OS copy and prevent QtCore from loading.
+if sys.platform == "win32":
+    a.binaries = [entry for entry in a.binaries if entry[0].casefold() != "icuuc.dll"]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(

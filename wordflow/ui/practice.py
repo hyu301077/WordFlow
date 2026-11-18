@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -17,7 +18,7 @@ from PySide6.QtWidgets import (
 
 from wordflow.jobs import start_session
 from wordflow.study import StudyService
-from wordflow.ui.common import fill_study_plan_combo, page_header, tell
+from wordflow.ui.common import card, fill_study_plan_combo, page_header, tell
 from wordflow.ui.study_widget import StudyWidget
 from wordflow.ui.workers import CallWorker
 
@@ -70,10 +71,12 @@ class PracticePage(QWidget):
         self.resume_button.hide()
         self.abandon_button.hide()
         layout.addLayout(resume_row)
+        panel, panel_layout = card()
         self.due_label = QLabel()
         self.due_label.setWordWrap(True)
-        layout.addWidget(self.due_label)
-        form = QHBoxLayout()
+        panel_layout.addWidget(self.due_label)
+        form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         self.mode = QComboBox()
         self.mode.addItem("单词卡片", "card")
         self.mode.addItem("四选一", "quiz")
@@ -84,33 +87,34 @@ class PracticePage(QWidget):
         self.count.setRange(1, 200)
         self.document = QComboBox()
         self.deck = QComboBox()
+        for combo in (self.document, self.deck):
+            combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(10)
         self.pending = QCheckBox("包含待确认的词")
         self.pending.setChecked(True)
         self.mistakes = QCheckBox("只复习错题")
         if self.kind != "placement":
-            form.addWidget(QLabel("方式"))
-            form.addWidget(self.mode)
-        form.addWidget(QLabel("数量"))
-        form.addWidget(self.count)
-        self.document_label = QLabel("学习计划")
-        form.addWidget(self.document_label)
-        form.addWidget(self.document)
-        form.addWidget(QLabel("词库"))
-        form.addWidget(self.deck)
-        form.addStretch(1)
-        layout.addLayout(form)
+            form.addRow("方式", self.mode)
+        form.addRow("数量", self.count)
+        form.addRow("学习计划", self.document)
+        form.addRow("词库", self.deck)
+        panel_layout.addLayout(form)
         if self.kind == "placement":
-            layout.addWidget(self.pending)
+            panel_layout.addWidget(self.pending)
         if self.kind == "review":
-            layout.addWidget(self.mistakes)
+            panel_layout.addWidget(self.mistakes)
         self.start_button = QPushButton("开始")
         self.start_button.setObjectName("primary")
         self.start_button.clicked.connect(self._start)
-        layout.addWidget(self.start_button)
+        start_row = QHBoxLayout()
+        start_row.addWidget(self.start_button)
+        start_row.addStretch(1)
+        panel_layout.addLayout(start_row)
         self.note = QLabel()
         self.note.setObjectName("muted")
         self.note.setWordWrap(True)
-        layout.addWidget(self.note)
+        panel_layout.addWidget(self.note)
+        layout.addWidget(panel)
         layout.addStretch(1)
         self.mode.setVisible(self.kind != "placement")
 
@@ -137,6 +141,7 @@ class PracticePage(QWidget):
         layout.addLayout(row)
         layout.addStretch(1)
         self._learning_ids: list[int] = []
+        self._report_session_id: int | None = None
 
     def on_show(self) -> None:
         if self.study_widget is not None:
@@ -186,6 +191,14 @@ class PracticePage(QWidget):
     def start_with_words(self, word_ids: list[int]) -> None:
         self.preset_ids = list(word_ids)
         self._start()
+
+    def select_plan(self, plan_id: int | None) -> None:
+        if self.study_widget and self.study_widget.session["document_id"] != plan_id:
+            self.study_widget.sentence_player.stop()
+            self._paused()
+        if self.stack.currentWidget() is self.report:
+            self._back_to_setup()
+        self._restore(self.document, plan_id)
 
     def _fill_filters(self) -> None:
         current_doc = self.document.currentData()
@@ -279,6 +292,7 @@ class PracticePage(QWidget):
 
     def _failed(self, message: str) -> None:
         self.start_button.setEnabled(True)
+        self.note.setText(message)
         tell(self, message, "error")
 
     def _mount(self, session_id: int) -> None:
@@ -294,7 +308,10 @@ class PracticePage(QWidget):
             self._finished(StudyService(self.ctx.store, self.ctx.dictionary).report(session_id))
             return
         self.stack.setCurrentWidget(self.session_host)
-        self.study_widget.setFocus()
+        if self.study_widget.spell.isVisible():
+            self.study_widget.spell.setFocus()
+        else:
+            self.study_widget.setFocus()
 
     def _paused(self) -> None:
         self.study_widget = None
@@ -303,6 +320,7 @@ class PracticePage(QWidget):
 
     def _finished(self, report: dict) -> None:
         self.study_widget = None
+        self._report_session_id = report["session"]["id"]
         self._learning_ids = report.get("learning_ids") or []
         lines = [
             f"题目 {report['total']} 道",
@@ -320,11 +338,13 @@ class PracticePage(QWidget):
         self.stack.setCurrentWidget(self.report)
 
     def _undo_last(self) -> None:
-        result = StudyService(self.ctx.store, self.ctx.dictionary).undo_last()
-        if not result:
-            tell(self, "没有可以撤销的作答。", "warn")
+        if self._report_session_id is None:
             return
-        tell(self, f"已撤销 {result['lemma']} 的最近一次作答。学习记录已恢复。", "info")
+        result = StudyService(self.ctx.store, self.ctx.dictionary).undo_last(self._report_session_id)
+        if not result:
+            tell(self, "这场练习没有可撤销的作答，或该词已有更新的学习记录。", "warn")
+            return
+        self._mount(self._report_session_id)
 
     def _learn_wrong(self) -> None:
         if self._learning_ids:
@@ -333,6 +353,20 @@ class PracticePage(QWidget):
     def _back_to_setup(self) -> None:
         self.stack.setCurrentWidget(self.setup)
         self.on_show()
+
+    def reset_after_restore(self) -> None:
+        # 已暂停或完成的页面也可能保留旧题目和已关闭的数据库连接。
+        for widget in self.session_host.findChildren(StudyWidget):
+            widget.sentence_player.stop()
+            self.session_layout.removeWidget(widget)
+            widget.deleteLater()
+        self.study_widget = None
+        self._report_session_id = None
+        self._learning_ids = []
+        self.preset_ids = None
+        self.document.setCurrentIndex(0)
+        self.deck.setCurrentIndex(0)
+        self._back_to_setup()
 
     def shutdown(self) -> None:
         if self.worker and self.worker.isRunning():

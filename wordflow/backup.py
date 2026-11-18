@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-import shutil
 import sqlite3
+from contextlib import closing
 from pathlib import Path
+from tempfile import NamedTemporaryFile
+from uuid import uuid4
 
 from wordflow.db import SCHEMA_VERSION
 from wordflow.timeutil import now_local
@@ -16,16 +18,22 @@ class BackupError(Exception):
 
 def backup_database(store, dest: Path) -> Path:
     dest = Path(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists():
-        dest.unlink()
-    target = sqlite3.connect(str(dest))
+    temporary = None
     try:
-        store.conn.backup(target)
+        if dest.exists() and dest.samefile(store.path):
+            raise BackupError("备份位置是正在使用的学习数据库，请选择另一个文件。")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile(dir=dest.parent, prefix=".wordflow-", suffix=".db", delete=False) as handle:
+            temporary = Path(handle.name)
+        with closing(sqlite3.connect(str(temporary))) as target:
+            store.conn.backup(target)
+            target.execute("PRAGMA journal_mode = DELETE")
+        temporary.replace(dest)
+    except (OSError, sqlite3.Error) as exc:
+        raise BackupError(f"备份写入失败：{exc}") from exc
     finally:
-        target.close()
-    if not dest.is_file() or dest.stat().st_size == 0:
-        raise BackupError("备份文件没有写成功")
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return dest
 
 
@@ -34,7 +42,7 @@ def validate_backup(path: Path) -> int:
     if not path.is_file():
         raise BackupError("找不到备份文件")
     try:
-        connection = sqlite3.connect(str(path))
+        connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
     except sqlite3.Error as exc:
         raise BackupError(f"无法读取备份：{exc}") from exc
     try:
@@ -59,24 +67,16 @@ def restore_database(store, source: Path, db_path: Path, safety_dir: Path) -> Pa
     db_path = Path(db_path)
     safety_dir = Path(safety_dir)
     validate_backup(source)
+    if source.samefile(db_path):
+        raise BackupError("所选文件是正在使用的学习数据库，请选择一份备份。")
     stamp = now_local().strftime("%Y%m%d-%H%M%S")
-    safety = safety_dir / f"wordflow-pre-restore-{stamp}.db"
+    safety = safety_dir / f"wordflow-pre-restore-{stamp}-{uuid4().hex[:8]}.db"
     backup_database(store, safety)
-    try:
-        store.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    except sqlite3.Error:
-        pass
+    with closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)) as snapshot:
+        if snapshot.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise BackupError("备份未通过数据库完整性检查。")
+        snapshot.backup(store.conn)
     store.close()
-    for suffix in ("-wal", "-shm"):
-        extra = Path(str(db_path) + suffix)
-        if extra.exists():
-            extra.unlink()
-    try:
-        shutil.copy2(source, db_path)
-        validate_backup(db_path)
-    except Exception:
-        shutil.copy2(safety, db_path)
-        raise
     return safety
 
 

@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -52,7 +53,7 @@ class AssistantPage(QWidget):
             )
         )
         self.enabled = QCheckBox("启用在线助手")
-        self.consent = QCheckBox("我确认允许发送本次所选的单词、例句或学习数量。不会自动上传本地文档。")
+        self.consent = QCheckBox("我同意将所选内容发给填写的模型服务")
         self.enabled.toggled.connect(self._save_flags)
         self.consent.toggled.connect(self._save_flags)
         self.base_url = QLineEdit()
@@ -81,18 +82,18 @@ class AssistantPage(QWidget):
         form.addWidget(self.lemma)
         form.addWidget(self.sentence, 1)
         layout.addLayout(form)
-        actions = QHBoxLayout()
-        for label, kind in (
+        actions = QGridLayout()
+        for index, (label, kind) in enumerate((
             ("解释句中词义", "explain"),
             ("记忆提示", "mnemonic"),
             ("生成例句", "example"),
             ("分析错词", "confusion"),
             ("生成短文", "reading"),
             ("一周安排", "plan"),
-        ):
+        )):
             button = QPushButton(label)
             button.clicked.connect(lambda _checked=False, name=kind: self._run(name))
-            actions.addWidget(button)
+            actions.addWidget(button, index // 3, index % 3)
         layout.addLayout(actions)
         self.output = QTextEdit()
         self.output.setReadOnly(True)

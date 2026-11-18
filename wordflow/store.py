@@ -21,6 +21,13 @@ _SORTS = {
 }
 
 
+def _plan_scope(document_id: int | None) -> tuple[str, tuple]:
+    """统计计划内的词，包括在其他入口对这些词的作答。"""
+    if document_id is None:
+        return "", ()
+    return " AND word_id IN (SELECT word_id FROM word_occurrences WHERE document_id = ?)", (document_id,)
+
+
 class Store:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -967,8 +974,9 @@ class Store:
                 previous["created_at"],
             ))
             old = previous["correct"]
-            if old != correct_flag and previous["day"] == today_str():
+            if old != correct_flag:
                 self._bump_daily(
+                    day=previous["day"],
                     correct=(1 if correct_flag == 1 else 0) - (1 if old == 1 else 0),
                     wrong=(1 if correct_flag == 0 else 0) - (1 if old == 0 else 0),
                 )
@@ -1009,12 +1017,11 @@ class Store:
                 (result, rating, item_id),
             )
             old = previous["correct"]
-            correct_delta = 0
-            wrong_delta = 0
-            if previous["day"] == today_str() and old != correct_flag:
-                correct_delta = (1 if correct_flag == 1 else 0) - (1 if old == 1 else 0)
-                wrong_delta = (1 if correct_flag == 0 else 0) - (1 if old == 0 else 0)
-            self._bump_daily(correct=correct_delta, wrong=wrong_delta)
+            self._bump_daily(
+                day=previous["day"],
+                correct=int(correct_flag == 1) - int(old == 1),
+                wrong=int(correct_flag == 0) - int(old == 0),
+            )
 
     def abandon_session(self, session_id: int) -> None:
         with self._guard():
@@ -1033,21 +1040,23 @@ class Store:
             (kind, limit),
         )
 
-    def undo_last_review(self) -> dict | None:
-        row = self._one(
-            """
-            SELECT r.*, w.lemma
-            FROM review_logs r
-            JOIN words w ON w.id = r.word_id
-            WHERE COALESCE(r.undone, 0) = 0 AND r.state_before_json IS NOT NULL
-            ORDER BY r.id DESC
-            LIMIT 1
-            """
-        )
-        if not row:
-            return None
-        before = state_from_dict(json.loads(row["state_before_json"]))
+    def undo_last_review(self, session_id: int | None = None) -> dict | None:
         with self._guard():
+            scope = " AND r.session_id = ?" if session_id is not None else ""
+            row = self._one(
+                f"""
+                SELECT r.*, w.lemma FROM review_logs r JOIN words w ON w.id = r.word_id
+                WHERE COALESCE(r.undone, 0) = 0 AND r.state_before_json IS NOT NULL {scope}
+                ORDER BY r.id DESC LIMIT 1
+                """,
+                (session_id,) if session_id is not None else (),
+            )
+            if not row or self._one(
+                "SELECT 1 FROM review_logs WHERE word_id = ? AND id > ? AND COALESCE(undone, 0) = 0 LIMIT 1",
+                (row["word_id"], row["id"]),
+            ):
+                return None
+            before = state_from_dict(json.loads(row["state_before_json"]))
             self.save_state(int(row["word_id"]), before)
             self.conn.execute("UPDATE review_logs SET undone = 1 WHERE id = ?", (row["id"],))
             if row["session_id"]:
@@ -1067,29 +1076,27 @@ class Store:
                     """,
                     (to_iso(now_local()), row["session_id"]),
                 )
-            if row["day"] == today_str():
-                rating = row["rating"] or ""
-                correct_flag = row["correct"]
-                self._bump_daily(
-                    studied=0 if rating == "skip" else -1,
-                    new_learned=-1 if row["mode"] == "learn" and rating != "skip" else 0,
-                    reviewed=-1 if row["mode"] == "review" and rating != "skip" else 0,
-                    correct=-1 if correct_flag == 1 else 0,
-                    wrong=-1 if correct_flag == 0 else 0,
-                )
+            studied = row["rating"] != "skip"
+            self._bump_daily(
+                day=row["day"], studied=-int(studied),
+                new_learned=-int(studied and row["mode"] == "learn"),
+                reviewed=-int(studied and row["mode"] == "review"),
+                correct=-int(row["correct"] == 1), wrong=-int(row["correct"] == 0),
+            )
         return {"word_id": int(row["word_id"]), "lemma": row["lemma"], "log_id": int(row["id"])}
 
-    def due_forecast(self, days: int = 7) -> list[dict]:
+    def due_forecast(self, days: int = 7, document_id: int | None = None) -> list[dict]:
         from datetime import timedelta
 
         start = now_local().date()
         labels = [(start + timedelta(days=offset)).isoformat() for offset in range(max(1, days))]
+        scope, params = _plan_scope(document_id)
         rows = self._all(
-            """
+            f"""
             SELECT next_review_at FROM learning_states
-            WHERE next_review_at IS NOT NULL AND substr(next_review_at, 1, 10) <= ?
+            WHERE next_review_at IS NOT NULL AND substr(next_review_at, 1, 10) <= ? {scope}
             """,
-            (labels[-1],),
+            (labels[-1], *params),
         )
         buckets = {label: 0 for label in labels}
         today = labels[0]
@@ -1101,12 +1108,13 @@ class Store:
                 buckets[day] += 1
         return [{"day": label[5:], "count": buckets[label]} for label in labels]
 
-    def leech_count(self) -> int:
-        row = self._one("SELECT COUNT(*) AS n FROM learning_states WHERE leech = 1")
+    def leech_count(self, document_id: int | None = None) -> int:
+        scope, params = _plan_scope(document_id)
+        row = self._one("SELECT COUNT(*) AS n FROM learning_states WHERE leech = 1" + scope, params)
         return int(row["n"] if row else 0)
 
-    def _bump_daily(self, *, studied=0, new_learned=0, reviewed=0, correct=0, wrong=0) -> None:
-        day = today_str()
+    def _bump_daily(self, *, day=None, studied=0, new_learned=0, reviewed=0, correct=0, wrong=0) -> None:
+        day = day or today_str()
         self.conn.execute("INSERT INTO daily_stats(day) VALUES (?) ON CONFLICT(day) DO NOTHING", (day,))
         self.conn.execute(
             """
@@ -1115,71 +1123,80 @@ class Store:
                 new_learned = MAX(0, new_learned + ?),
                 reviewed = MAX(0, reviewed + ?),
                 correct = MAX(0, correct + ?),
-                wrong = MAX(0, wrong + ?),
+                wrong = MAX(0, wrong + ?)
+            WHERE day = ?
+            """,
+            (studied, new_learned, reviewed, correct, wrong, day),
+        )
+        self.conn.execute(
+            """
+            UPDATE daily_stats SET
                 mastered_total = (SELECT COUNT(*) FROM learning_states WHERE status = 'mastered'),
                 learning_total = (SELECT COUNT(*) FROM learning_states WHERE status IN ('learning', 'reviewing')),
                 untested_total = (SELECT COUNT(*) FROM learning_states WHERE status = 'untested')
             WHERE day = ?
             """,
-            (studied, new_learned, reviewed, correct, wrong, day),
+            (today_str(),),
         )
 
-    def status_counts(self) -> dict[str, int]:
-        rows = self._all("SELECT status, COUNT(*) AS n FROM learning_states GROUP BY status")
+    def status_counts(self, document_id: int | None = None) -> dict[str, int]:
+        scope, params = _plan_scope(document_id)
+        rows = self._all(f"SELECT status, COUNT(*) AS n FROM learning_states WHERE 1=1 {scope} GROUP BY status", params)
         counts = {row["status"]: int(row["n"]) for row in rows}
         for key in ("untested", "pending", "learning", "reviewing", "mastered"):
             counts.setdefault(key, 0)
         counts["total"] = sum(counts[key] for key in ("untested", "pending", "learning", "reviewing", "mastered"))
         return counts
 
-    def average_mastery(self) -> float:
-        row = self.conn.execute("SELECT AVG(mastery) FROM learning_states").fetchone()
+    def average_mastery(self, document_id: int | None = None) -> float:
+        scope, params = _plan_scope(document_id)
+        row = self.conn.execute("SELECT AVG(mastery) FROM learning_states WHERE 1=1" + scope, params).fetchone()
         return float(row[0] or 0)
 
-    def dashboard(self, daily_goal: int) -> dict:
+    def dashboard(self, daily_goal: int, document_id: int | None = None) -> dict:
         now = to_iso(now_local())
         today = today_str()
+        scope, params = _plan_scope(document_id)
         due = self._one(
-            """
+            f"""
             SELECT
                 SUM(CASE WHEN status != 'mastered' THEN 1 ELSE 0 END) AS learning,
                 SUM(CASE WHEN status = 'mastered' THEN 1 ELSE 0 END) AS mastered
             FROM learning_states
-            WHERE next_review_at IS NOT NULL AND next_review_at <= ?
+            WHERE next_review_at IS NOT NULL AND next_review_at <= ? {scope}
             """,
-            (now,),
+            (now, *params),
         ) or {"learning": 0, "mastered": 0}
         studied = self._one(
-            "SELECT COUNT(DISTINCT word_id) AS n FROM review_logs WHERE day = ? AND rating != 'skip'",
-            (today,),
+            f"""SELECT COUNT(DISTINCT word_id) AS n,
+                       COUNT(DISTINCT CASE WHEN mode = 'learn' THEN word_id END) AS new_words
+                FROM review_logs WHERE day = ? AND rating != 'skip' AND COALESCE(undone, 0) = 0 {scope}""",
+            (today, *params),
         )
-        new_learned = self._one(
-            "SELECT COUNT(DISTINCT word_id) AS n FROM review_logs WHERE day = ? AND mode = 'learn'",
-            (today,),
-        )
-        counts = self.status_counts()
+        counts = self.status_counts(document_id)
         return {
             "due_learning": int(due["learning"] or 0),
             "due_mastered": int(due["mastered"] or 0),
             "due_total": int(due["learning"] or 0) + int(due["mastered"] or 0),
             "daily_goal": daily_goal,
             "studied_today": int(studied["n"] if studied else 0),
-            "new_today": int(new_learned["n"] if new_learned else 0),
+            "new_today": int(studied["new_words"]),
             "counts": counts,
-            "average_mastery": round(self.average_mastery(), 1),
-            "streak": self.streak(),
+            "average_mastery": round(self.average_mastery(document_id), 1),
+            "streak": self.streak(document_id),
         }
 
-    def activity_days(self) -> list[str]:
+    def activity_days(self, document_id: int | None = None) -> list[str]:
+        scope, params = _plan_scope(document_id)
         rows = self.conn.execute(
-            "SELECT DISTINCT day FROM review_logs WHERE rating != 'skip' ORDER BY day"
+            f"SELECT DISTINCT day FROM review_logs WHERE rating != 'skip' AND COALESCE(undone, 0) = 0 {scope} ORDER BY day", params
         ).fetchall()
         return [row[0] for row in rows]
 
-    def streak(self) -> int:
+    def streak(self, document_id: int | None = None) -> int:
         from datetime import timedelta
 
-        days = set(self.activity_days())
+        days = set(self.activity_days(document_id))
         cursor = now_local().date()
         if cursor.isoformat() not in days:
             cursor = cursor - timedelta(days=1)
@@ -1189,15 +1206,22 @@ class Store:
             cursor -= timedelta(days=1)
         return streak
 
-    def daily_series(self, days: int) -> list[dict]:
+    def daily_series(self, days: int, document_id: int | None = None) -> list[dict]:
         from datetime import timedelta
 
         today = now_local().date()
         start = today - timedelta(days=days - 1)
-        rows = {
-            row["day"]: row
-            for row in self._all("SELECT * FROM daily_stats WHERE day >= ?", (start.isoformat(),))
-        }
+        if document_id is None:
+            records = self._all("SELECT * FROM daily_stats WHERE day >= ?", (start.isoformat(),))
+        else:
+            scope, params = _plan_scope(document_id)
+            records = self._all(
+                f"""SELECT day, COUNT(*) AS studied, SUM(correct = 1) AS correct, SUM(correct = 0) AS wrong
+                    FROM review_logs WHERE day >= ? AND rating != 'skip' AND COALESCE(undone, 0) = 0 {scope}
+                    GROUP BY day""",
+                (start.isoformat(), *params),
+            )
+        rows = {row["day"]: row for row in records}
         series = []
         for offset in range(days):
             day = (start + timedelta(days=offset)).isoformat()
@@ -1206,9 +1230,9 @@ class Store:
                 {
                     "day": day[5:],
                     "studied": int(row["studied"]) if row else 0,
-                    "correct": int(row["correct"]) if row else 0,
-                    "wrong": int(row["wrong"]) if row else 0,
-                    "mastered_total": int(row["mastered_total"]) if row else 0,
+                    "correct": int(row["correct"] or 0) if row else 0,
+                    "wrong": int(row["wrong"] or 0) if row else 0,
+                    **({"mastered_total": int(row["mastered_total"]) if row else 0} if document_id is None else {}),
                 }
             )
         return series
@@ -1234,15 +1258,18 @@ class Store:
             tuple(params),
         )
 
-    def placement_trend(self, limit: int = 12) -> list[dict]:
-        sessions = self.recent_sessions("placement", limit)
-        trend = []
-        for session in reversed(sessions):
-            counts = self.session_result_counts(session["id"])
-            graded = counts.get("correct", 0) + counts.get("wrong", 0) + counts.get("unknown", 0)
-            accuracy = (counts.get("correct", 0) / graded * 100) if graded else 0
-            trend.append({"label": (session["finished_at"] or "")[5:10], "accuracy": round(accuracy, 1)})
-        return trend
+    def placement_trend(self, limit: int = 12, document_id: int | None = None) -> list[dict]:
+        scope, params = _plan_scope(document_id)
+        rows = self._all(
+            f"""SELECT substr(s.finished_at, 6, 5) AS label,
+                       ROUND(100.0 * SUM(i.result = 'correct') / COUNT(*), 1) AS accuracy
+                FROM study_sessions s JOIN session_items i ON i.session_id = s.id
+                WHERE s.kind = 'placement' AND s.status = 'completed'
+                  AND i.result IN ('correct', 'wrong', 'unknown') {scope}
+                GROUP BY s.id ORDER BY s.finished_at DESC, s.id DESC LIMIT ?""",
+            (*params, limit),
+        )
+        return rows[::-1]
 
     def session_result_counts(self, session_id: int) -> dict[str, int]:
         rows = self._all(

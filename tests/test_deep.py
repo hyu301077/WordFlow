@@ -5,12 +5,13 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from pathlib import Path
 
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
-from wordflow.ai import AIError, client_from_settings, explain_prompt
+from wordflow.ai import AIClient, AIError, client_from_settings, explain_prompt
 from wordflow.db import SCHEMA_V1
 from wordflow.dictionary import Dictionary
 from wordflow.extract import ExtractOptions
@@ -135,6 +136,13 @@ def test_old_database_gains_fsrs_fields(tmp_path: Path):
     columns = {row[1] for row in store.conn.execute("PRAGMA table_info(ai_records)")}
     assert "content" in columns
     store.close()
+
+
+def test_online_assistant_reads_mixed_text_parts(monkeypatch):
+    body = {"choices": [{"message": {"content": ["第一段", {"text": "第二段"}, {"type": "image"}, None]}}]}
+    response = BytesIO(json.dumps(body).encode("utf-8"))
+    monkeypatch.setattr("wordflow.ai.urllib.request.urlopen", lambda *_args, **_kwargs: response)
+    assert AIClient("http://localhost/v1", "", "test").complete("system", "user") == "第一段\n第二段"
 
 
 def test_online_assistant_is_opt_in_and_does_not_change_quiz(tmp_path: Path):

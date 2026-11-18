@@ -69,7 +69,7 @@ Keep any older pause-based `sentences/` if it already exists; do not overwrite i
 
 ### 4. Split by complete sentences
 1. From the English transcript body, split on `.` / `?` / `!` into complete sentences. Preserve short utterances for now (`Yes!`, `Enormous.`). Do not split on periods inside quotes/abbreviations. Skip titles and meta notes.
-2. Align each sentence to the word timeline (normalized token match / sliding window). Leave ~50–100 ms margins; estimate audience-only lines from gaps if needed.
+2. Match the normalized transcript against the timed words in order. If a segment has incomplete word times, use its original segment boundaries and keep sentences together until a timed boundary coincides with a sentence end. Add up to 80 ms of padding in available gaps, splitting short gaps between adjacent clips.
 3. Export provisional `sentences_by_sentence/NNN.mp3` with `libmp3lame` ~128k between aligned start/end.
 4. Write provisional `index.json` and `index.md` (number, start, end, duration, English text).
 5. Spot-check several durations with `ffprobe`; if many alignments fail, re-run timeline or fall back to whisper segment times then merge by punctuation.
@@ -81,7 +81,7 @@ After the grammar cut, tiny fragments are hard to study alone. **Always** run th
 1. **Word-short:** English word count ≤ **3** (split on whitespace).
 2. **Time-short:** clip `duration` (or `end - start`) **&lt; 4.0** seconds.
 
-Run word-short first, then time-short. After each stage, **iterate** until no clip still matches that stage’s rule (cap ~20 passes). If a talk would collapse to a single clip under the threshold, leave that one clip.
+Run word-short first, then time-short. In each stage, keep merging until no clip matches the rule or only one clip remains.
 
 #### Neighbor rule (same for both stages)
 For short clip `S` at index `i`:

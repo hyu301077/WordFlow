@@ -160,3 +160,33 @@ def test_undo_forecast_cloze_listen_and_leech_queue(tmp_path: Path):
     assert any(row["id"] == apple["id"] for row in rows)
     store.close()
     dictionary.close()
+
+
+def test_undo_is_scoped_to_session_and_original_day(tmp_path, monkeypatch):
+    store = Store(tmp_path / "study.db")
+    service = StudyService(store, None)
+    first = store.ensure_word("apple", "apple", None)
+    second = store.ensure_word("bank", "bank", None)
+
+    def answer(word_id):
+        sid = store.create_session("learn", "card", None, None, [{"word_id": word_id}])
+        service.answer(sid, store.session_items(sid)[0], result=None, rating="good", chosen=None)
+        return sid
+
+    yesterday = (now_local().date() - timedelta(days=1)).isoformat()
+    with monkeypatch.context() as patch:
+        patch.setattr("wordflow.store.today_str", lambda: yesterday)
+        old = answer(first)
+    recent = answer(second)
+    newer_same_word = answer(first)
+    assert service.undo_last(old) is None
+    assert service.undo_last(newer_same_word)["word_id"] == first
+    assert service.undo_last(old)["word_id"] == first
+    assert store.get_session(recent)["status"] == "completed"
+    assert store.activity_days() == [today_str()]
+    assert store.daily_series(2)[0]["studied"] == 0
+    assert store.daily_series(2)[0]["correct"] == 0
+    assert store.dashboard(20)["new_today"] == 1
+    assert service.undo_last(recent)["word_id"] == second
+    assert store.dashboard(20)["studied_today"] == store.streak() == 0
+    store.close()

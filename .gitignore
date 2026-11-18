@@ -9,6 +9,8 @@ build/
 data/ecdict.db
 data/stardict.db
 data/*.zip
+frontend/data/ecdict.db
+frontend/data/ecdict-sqlite-*.zip
 data/ecdict-tmp/
 data/_smoke.db
 data/_smoke.db-*

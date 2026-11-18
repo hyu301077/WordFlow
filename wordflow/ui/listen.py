@@ -8,10 +8,12 @@ from PySide6.QtCore import QAbstractTableModel, QSize, Qt, QTimer
 from PySide6.QtGui import QTextDocument
 from PySide6.QtMultimedia import QMediaDevices
 from PySide6.QtWidgets import (
+    QBoxLayout,
     QButtonGroup,
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -107,7 +109,7 @@ class ListenPage(QWidget):
         self._restored = False
         self._advancing = False
         layout = QVBoxLayout(self)
-        layout.addWidget(page_header("语音朗读", "选择一个文件夹，列出里面的全部 MP3。点某一行即可播放。可以循环当前这一条。句子会完整显示，不省略后面的单词。听不到声音时，把播放设备改成正在使用的扬声器或耳机。"))
+        layout.addWidget(page_header("语音朗读", "选择包含 MP3 的文件夹，点击列表里的句子开始播放。"))
         picker = QHBoxLayout()
         self.folder_edit = QLineEdit()
         self.folder_edit.setReadOnly(True)
@@ -120,9 +122,15 @@ class ListenPage(QWidget):
         picker.addWidget(choose)
         picker.addWidget(refresh)
         layout.addLayout(picker)
+        player = QFrame()
+        player.setObjectName("player")
+        player_layout = QVBoxLayout(player)
+        player_layout.setContentsMargins(22, 18, 22, 18)
+        player_layout.setSpacing(12)
         self.status = QLabel("选择文件夹后，这里会列出检索到的 MP3。")
         self.status.setWordWrap(True)
-        layout.addWidget(self.status)
+        self.status.setObjectName("muted")
+        player_layout.addWidget(self.status)
         speeds = QHBoxLayout()
         speeds.addWidget(QLabel("倍速"))
         self.rate_group = QButtonGroup(self)
@@ -130,16 +138,27 @@ class ListenPage(QWidget):
         self.rate_buttons: dict[float, QPushButton] = {}
         for rate in RATES:
             button = QPushButton(f"{rate:g}×")
+            button.setObjectName("speedButton")
             button.setCheckable(True)
             button.clicked.connect(lambda _checked=False, value=rate: self._set_rate(value))
             self.rate_group.addButton(button)
             self.rate_buttons[rate] = button
             speeds.addWidget(button)
-        speeds.addWidget(QLabel("播放设备"))
+        speeds.addStretch(1)
+        device_row = QHBoxLayout()
+        device_label = QLabel("播放设备")
         self.device = QComboBox()
+        self.device.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.device.setMinimumContentsLength(8)
         self.device.currentIndexChanged.connect(self._device_changed)
-        speeds.addWidget(self.device, 1)
-        layout.addLayout(speeds)
+        self.device.currentTextChanged.connect(self.device.setToolTip)
+        device_label.setBuddy(self.device)
+        device_row.addWidget(device_label)
+        device_row.addWidget(self.device, 1)
+        self.playback_options = QBoxLayout(QBoxLayout.TopToBottom)
+        self.playback_options.addLayout(speeds)
+        self.playback_options.addLayout(device_row, 1)
+        player_layout.addLayout(self.playback_options)
         transport = QHBoxLayout()
         previous = QPushButton("上一句")
         self.play_button = QPushButton("播放")
@@ -159,13 +178,17 @@ class ListenPage(QWidget):
         transport.addWidget(self.play_button)
         transport.addWidget(next_button)
         transport.addWidget(stop)
-        transport.addWidget(self.auto_next)
-        transport.addWidget(self.loop)
         transport.addStretch(1)
-        layout.addLayout(transport)
+        player_layout.addLayout(transport)
+        modes = QHBoxLayout()
+        modes.addWidget(self.auto_next)
+        modes.addWidget(self.loop)
+        modes.addStretch(1)
+        player_layout.addLayout(modes)
         self.now = QLabel("还没有开始朗读。")
         self.now.setWordWrap(True)
-        layout.addWidget(self.now)
+        self.now.setObjectName("muted")
+        player_layout.addWidget(self.now)
         self.sentence = QLabel("选择一行后，这里显示完整英文句子。")
         self.sentence.setObjectName("listenSentence")
         self.sentence.setWordWrap(True)
@@ -173,7 +196,7 @@ class ListenPage(QWidget):
         sentence_font = self.sentence.font()
         sentence_font.setPointSize(sentence_font.pointSize() + 3)
         self.sentence.setFont(sentence_font)
-        layout.addWidget(self.sentence)
+        player_layout.addWidget(self.sentence)
         progress = QHBoxLayout()
         self.elapsed = QLabel("0:00")
         self.slider = QSlider(Qt.Horizontal)
@@ -184,9 +207,12 @@ class ListenPage(QWidget):
         progress.addWidget(self.elapsed)
         progress.addWidget(self.slider, 1)
         progress.addWidget(self.total)
-        layout.addLayout(progress)
+        player_layout.addLayout(progress)
+        layout.addWidget(player)
         self.model = ClipModel()
         self.view = QTableView()
+        self.view.setAlternatingRowColors(True)
+        self.view.setShowGrid(False)
         self.view.setModel(self.model)
         self.view.setSelectionBehavior(QTableView.SelectRows)
         self.view.setSelectionMode(QTableView.SingleSelection)
@@ -217,6 +243,8 @@ class ListenPage(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        direction = QBoxLayout.LeftToRight if event.size().width() >= 840 else QBoxLayout.TopToBottom
+        self.playback_options.setDirection(direction)
         text = self.sentence.text()
         width = self.sentence.width()
         if width < 80 or not text:

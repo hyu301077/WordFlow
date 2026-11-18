@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QComboBox, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
+    QBoxLayout,
+    QComboBox,
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from wordflow.ui.chart import BarChart
-from wordflow.ui.common import fill_study_plan_combo, page_header, stat_card
+from wordflow.ui.common import card, fill_study_plan_combo, page_header, section_title, stat_card
 
 
 class DashboardPage(QWidget):
@@ -14,98 +27,179 @@ class DashboardPage(QWidget):
         self.ctx = ctx
         self.navigator = navigator
         layout = QVBoxLayout(self)
-        layout.addWidget(page_header("今天", "先复习到期的词，再学习新词。数据都保存在这台电脑上。"))
-        plan_row = QHBoxLayout()
-        plan_row.addWidget(QLabel("学习计划"))
+        layout.setSpacing(16)
+        top = QHBoxLayout()
+        top.setSpacing(16)
+        top.addWidget(page_header("今天", "先复习到期的词，再学习新词。"), 1)
+        scope = QVBoxLayout()
+        scope.setSpacing(4)
+        scope_label = QLabel("学习范围")
+        scope_label.setObjectName("muted")
         self.plan = QComboBox()
+        self.plan.setMinimumWidth(180)
+        self.plan.setMaximumWidth(260)
+        self.plan.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        scope_label.setBuddy(self.plan)
         self.plan.currentIndexChanged.connect(lambda _index: self.on_show())
-        plan_row.addWidget(self.plan, 1)
-        layout.addLayout(plan_row)
+        scope.addWidget(scope_label)
+        scope.addWidget(self.plan)
+        top.addLayout(scope)
+        layout.addLayout(top)
         self.banner = QLabel()
         self.banner.setObjectName("banner")
         self.banner.setWordWrap(True)
         self.banner.hide()
         layout.addWidget(self.banner)
         self.cards = {}
+        hero = QFrame()
+        hero.setObjectName("hero")
+        shadow = QGraphicsDropShadowEffect(hero)
+        shadow.setBlurRadius(18)
+        shadow.setOffset(0, 4)
+        shadow.setColor(QColor(80, 120, 180, 28))
+        hero.setGraphicsEffect(shadow)
+        hero_layout = QHBoxLayout(hero)
+        hero_layout.setContentsMargins(22, 22, 22, 22)
+        hero_layout.setSpacing(18)
+        left = QVBoxLayout()
+        left.setSpacing(4)
+        kicker = QLabel("今日待复习")
+        kicker.setObjectName("heroKicker")
+        due = QLabel("0")
+        due.setObjectName("heroValue")
+        self.cards["due"] = due
+        self.average = QLabel()
+        self.average.setObjectName("heroNote")
+        self.average.setWordWrap(True)
+        actions = QHBoxLayout()
+        actions.setSpacing(10)
+        self.actions = [QPushButton() for _ in range(3)]
+        for index, button in enumerate(self.actions):
+            button.setObjectName("heroPrimary" if index == 0 else "heroGhost")
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(lambda _checked=False, action=button: self._open_action(action.property("route")))
+            actions.addWidget(button)
+        actions.addStretch(1)
+        left.addWidget(kicker)
+        left.addWidget(due)
+        left.addWidget(self.average)
+        left.addSpacing(10)
+        left.addLayout(actions)
+        right = QVBoxLayout()
+        right.setSpacing(0)
+        right.addStretch(1)
+        streak_label = QLabel("连续学习")
+        streak_label.setObjectName("heroKicker")
+        streak_label.setAlignment(Qt.AlignRight)
+        streak = QLabel("0")
+        streak.setObjectName("heroValue")
+        streak.setAlignment(Qt.AlignRight)
+        days = QLabel("天")
+        days.setObjectName("heroKicker")
+        days.setAlignment(Qt.AlignRight)
+        self.cards["streak"] = streak
+        right.addWidget(streak_label)
+        right.addWidget(streak)
+        right.addWidget(days)
+        right.addStretch(1)
+        hero_layout.addLayout(left, 1)
+        hero_layout.addLayout(right)
+        layout.addWidget(hero)
         grid = QGridLayout()
-        for index, (key, caption) in enumerate(
-            (
-                ("due", "今日待复习"),
-                ("goal", "今日计划新词"),
-                ("studied", "今日已学习"),
-                ("streak", "连续学习天数"),
-                ("total", "词库总词数"),
-                ("learning", "生词"),
-                ("mastered", "熟词"),
-                ("untested", "尚未测试"),
-            )
-        ):
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+        metrics = (
+            ("goal", "每日新词目标"),
+            ("studied", "今日已学词数"),
+            ("total", "词库"),
+            ("learning", "生词"),
+            ("mastered", "熟词"),
+            ("untested", "尚未测试"),
+        )
+        for index, (key, caption) in enumerate(metrics):
             frame, value = stat_card(caption)
             self.cards[key] = value
-            grid.addWidget(frame, index // 4, index % 4)
-        for column in range(4):
+            grid.addWidget(frame, index // 3, index % 3)
+        for column in range(3):
             grid.setColumnStretch(column, 1)
         layout.addLayout(grid)
-        buttons = QHBoxLayout()
-        review = QPushButton("开始今日复习")
-        learn = QPushButton("学习新词")
-        placement = QPushButton("摸底测试")
-        review.setObjectName("primary")
-        review.clicked.connect(lambda: navigator.go("review"))
-        learn.clicked.connect(lambda: navigator.go("learn"))
-        placement.clicked.connect(lambda: navigator.go("placement"))
-        buttons.addWidget(review)
-        buttons.addWidget(learn)
-        buttons.addWidget(placement)
-        buttons.addStretch(1)
-        layout.addLayout(buttons)
-        self.average = QLabel()
-        self.average.setObjectName("muted")
-        layout.addWidget(self.average)
-        layout.addWidget(QLabel("最近 7 天学习单词数"))
-        self.chart = BarChart()
-        layout.addWidget(self.chart, 1)
-        layout.addWidget(QLabel("未来 7 天到期单词数（逾期算在今天）"))
-        self.forecast = BarChart()
-        layout.addWidget(self.forecast, 1)
+        self.charts = QBoxLayout(QBoxLayout.LeftToRight)
+        self.charts.setSpacing(12)
+        self.chart = BarChart(empty_text="这 7 天还没有练习记录")
+        self.chart.setMinimumHeight(168)
+        self.chart.setMaximumHeight(190)
+        self.forecast = BarChart(empty_text="这 7 天没有到期词")
+        self.forecast.setMinimumHeight(168)
+        self.forecast.setMaximumHeight(190)
+        self.charts.addWidget(self._chart_card("最近 7 天学习量", self.chart), 1)
+        self.charts.addWidget(self._chart_card("未来 7 天到期", self.forecast), 1)
+        layout.addLayout(self.charts)
+        wrong_frame, wrong_layout = card()
+        wrong_layout.addWidget(section_title("容易出错"))
         self.wrong = QLabel()
         self.wrong.setWordWrap(True)
-        layout.addWidget(self.wrong)
+        wrong_layout.addWidget(self.wrong)
+        layout.addWidget(wrong_frame)
+        layout.addStretch(1)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        direction = QBoxLayout.LeftToRight if event.size().width() >= 780 else QBoxLayout.TopToBottom
+        self.charts.setDirection(direction)
+
+    def _open_action(self, kind: str) -> None:
+        plan_id = self.plan.currentData()
+        self.navigator.go(kind)
+        if kind in {"review", "learn", "placement"}:
+            self.navigator.pages[kind].select_plan(plan_id)
+
+    def _chart_card(self, title: str, chart: BarChart) -> QWidget:
+        frame, inner = card()
+        inner.addWidget(section_title(title))
+        inner.addWidget(chart)
+        return frame
 
     def on_show(self) -> None:
         fill_study_plan_combo(self.plan, self.ctx.store, self.plan.currentData(), all_label="全部")
         plan_id = self.plan.currentData()
+        self.plan.setToolTip(self.plan.currentText())
         goal = self.ctx.settings.integer("daily_new_limit", 20)
-        data = self.ctx.store.dashboard(goal)
+        data = self.ctx.store.dashboard(goal, plan_id)
         counts = data["counts"]
-        if plan_id:
-            coverage = self.ctx.store.coverage(int(plan_id))
-            due = len(self.ctx.store.pick_word_ids(purpose="due", limit=500, document_id=int(plan_id)))
-            self.cards["due"].setText(str(due))
-            self.cards["total"].setText(str(int(coverage["unique_count"] or 0)))
-            self.cards["learning"].setText(str(int(coverage["learning"] or 0)))
-            self.cards["mastered"].setText(str(int(coverage["mastered"] or 0)))
-            self.cards["untested"].setText(str(int(coverage["untested"] or 0)))
-        else:
-            self.cards["due"].setText(str(data["due_total"]))
-            self.cards["total"].setText(str(counts["total"]))
-            self.cards["learning"].setText(str(counts["learning"] + counts["reviewing"]))
-            self.cards["mastered"].setText(str(counts["mastered"]))
-            self.cards["untested"].setText(str(counts["untested"]))
+        routes = ["review", "learn", "placement"]
+        if not counts["total"] and plan_id is None:
+            routes = ["import", "articles", "plans"]
+        elif not data["due_total"]:
+            if counts["untested"] or counts["pending"]:
+                routes = ["placement", "learn", "review"]
+            elif self.ctx.store.pick_word_ids(purpose="new", limit=1, document_id=plan_id):
+                routes = ["learn", "review", "placement"]
+            else:
+                routes = ["plans", "review", "learn"]
+        labels = {"review": "开始复习", "learn": "学习新词", "placement": "摸底测试",
+                  "import": "导入文档", "articles": "英文文章", "plans": "学习计划"}
+        for button, route in zip(self.actions, routes):
+            button.setProperty("route", route)
+            button.setText(labels[route])
+        self.cards["due"].setText(str(data["due_total"]))
+        self.cards["total"].setText(str(counts["total"]))
+        self.cards["learning"].setText(str(counts["learning"] + counts["reviewing"]))
+        self.cards["mastered"].setText(str(counts["mastered"]))
+        self.cards["untested"].setText(str(counts["untested"]))
         self.cards["goal"].setText(str(goal))
         self.cards["studied"].setText(str(data["studied_today"]))
         self.cards["streak"].setText(str(data["streak"]))
-        leeches = self.ctx.store.leech_count()
+        leeches = self.ctx.store.leech_count(plan_id)
         self.average.setText(
             f"平均掌握程度 {data['average_mastery']}。待确认 {counts['pending']} 个。多次遗忘 {leeches} 个。"
         )
-        series = self.ctx.store.daily_series(7)
+        series = self.ctx.store.daily_series(7, plan_id)
         self.chart.set_series([item["day"] for item in series], [item["studied"] for item in series])
-        forecast = self.ctx.store.due_forecast(7)
+        forecast = self.ctx.store.due_forecast(7, plan_id)
         self.forecast.set_series([item["day"] for item in forecast], [item["count"] for item in forecast])
         wrong = self.ctx.store.top_wrong(5, int(plan_id) if plan_id else None)
         if wrong:
-            text = "最近容易出错：" + "、".join(f"{item['lemma']}（{item['wrong_count']} 次）" for item in wrong)
+            text = "、".join(f"{item['lemma']}（{item['wrong_count']} 次）" for item in wrong)
         else:
             text = "还没有错题记录。"
         self.wrong.setText(text)

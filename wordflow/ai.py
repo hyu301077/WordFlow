@@ -50,7 +50,8 @@ class AIClient:
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             raise AIError("模型返回的内容无法读取。") from exc
         if isinstance(message, list):
-            message = "\n".join(str(part.get("text") or part) for part in message if isinstance(part, dict) or part)
+            parts = [part.get("text") if isinstance(part, dict) else part for part in message]
+            message = "\n".join(part for part in parts if isinstance(part, str) and part.strip())
         text = str(message or "").strip()
         if not text:
             raise AIError("模型没有返回文字。")

@@ -9,9 +9,12 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QPushButton,
     QDoubleSpinBox,
@@ -23,7 +26,8 @@ from PySide6.QtWidgets import (
 
 from wordflow.backup import BackupError, backup_database, maybe_auto_backup, restore_database
 from wordflow.timeutil import now_local
-from wordflow.ui.common import confirm, page_header, tell
+from wordflow.ui.common import card, confirm, page_header, section_title, tell
+from wordflow.ui.workers import CallWorker
 from wordflow.vocab import export_csv, export_json, import_table
 
 
@@ -33,6 +37,7 @@ class SettingsPage(QWidget):
         self.ctx = ctx
         self.navigator = navigator
         layout = QVBoxLayout(self)
+        layout.setSpacing(14)
         layout.addWidget(page_header("设置", "基础学习不需要登录，也不需要联网。"))
         self.theme = QComboBox()
         self.theme.addItem("浅色", "light")
@@ -73,67 +78,98 @@ class SettingsPage(QWidget):
         self.acronyms.toggled.connect(lambda checked: self.ctx.settings.set("filter_acronyms", int(checked)))
         self.reminder = QCheckBox("启动时如果有到期单词，显示提醒")
         self.reminder.toggled.connect(lambda checked: self.ctx.settings.set("reminder", int(checked)))
-        layout.addWidget(QLabel("外观"))
-        layout.addWidget(self.theme)
-        layout.addWidget(QLabel("每天计划学习的新词数量"))
-        layout.addWidget(self.goal)
-        layout.addWidget(QLabel("希望记住的比例（只影响之后的复习，不会改已经排好的日期）"))
-        layout.addWidget(self.retention)
-        layout.addWidget(QLabel("遗忘达到几次后标记为多次遗忘"))
-        layout.addWidget(self.leech)
-        layout.addWidget(self.auto_speak)
+        preference, preference_layout = card()
+        preference_layout.addWidget(section_title("学习偏好"))
+        preferences = QFormLayout()
+        preferences.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        for caption, field in (
+            ("外观", self.theme),
+            ("每天计划学习的新词数量", self.goal),
+            ("希望记住的比例，只影响之后的复习", self.retention),
+            ("遗忘达到几次后标记为多次遗忘", self.leech),
+        ):
+            field.setMaximumWidth(220)
+            preferences.addRow(caption, field)
+        preference_layout.addLayout(preferences)
+        preference_layout.addWidget(self.reminder)
+        preference_layout.addWidget(self.stopwords)
+        preference_layout.addWidget(self.proper)
+        preference_layout.addWidget(self.acronyms)
+        layout.addWidget(preference)
+
+        speech, speech_layout = card()
+        speech_layout.addWidget(section_title("语音"))
+        self.voice.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.voice.setMinimumContentsLength(8)
+        voice_label = QLabel("英语语音")
+        voice_label.setBuddy(self.voice)
         voice_row = QHBoxLayout()
-        voice_row.addWidget(QLabel("英语语音"))
+        voice_row.addWidget(voice_label)
         voice_row.addWidget(self.voice, 1)
-        voice_row.addWidget(QLabel("语速"))
-        voice_row.addWidget(self.rate)
-        voice_row.addWidget(QLabel("音量"))
-        voice_row.addWidget(self.volume)
         voice_row.addWidget(speak)
-        layout.addLayout(voice_row)
-        layout.addWidget(self.speech_label)
-        layout.addWidget(self.stopwords)
-        layout.addWidget(self.proper)
-        layout.addWidget(self.acronyms)
-        layout.addWidget(self.reminder)
-        layout.addWidget(QLabel(
-            "快捷键：1/2/3/4 选择或评分，Space 朗读单词，Enter 确认或下一题，S 不认识，F 加入熟词本，Esc 退出当前练习。"
+        speech_layout.addLayout(voice_row)
+        playback = QFormLayout()
+        playback.addRow("语速", self.rate)
+        playback.addRow("音量", self.volume)
+        speech_layout.addLayout(playback)
+        speech_layout.addWidget(self.auto_speak)
+        speech_layout.addWidget(self.speech_label)
+        layout.addWidget(speech)
+
+        shortcuts = QLabel(
+            "1/2/3/4 选择或评分，Space 朗读单词，Enter 确认或下一题，S 不认识，F 加入熟词本，Esc 退出当前练习。"
             "拼写输入框里按 Space 会输入空格，请用朗读按钮。"
-        ))
+        )
+        shortcuts.setWordWrap(True)
+        shortcuts_card, shortcuts_layout = card()
+        shortcuts_layout.addWidget(section_title("快捷键"))
+        shortcuts_layout.addWidget(shortcuts)
+        data_card, data_layout = card()
+        data_layout.addWidget(section_title("词库与数据"))
         self.dict_label = QLabel()
         self.dict_label.setWordWrap(True)
-        layout.addWidget(self.dict_label)
-        self.data_label = QLabel()
-        self.data_label.setWordWrap(True)
-        self.data_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self.data_label)
+        data_layout.addWidget(self.dict_label)
+        self.data_path = QLineEdit()
+        self.data_path.setReadOnly(True)
+        path_label = QLabel("学习数据库路径")
+        path_label.setBuddy(self.data_path)
+        data_layout.addWidget(path_label)
+        data_layout.addWidget(self.data_path)
         open_dir = QPushButton("打开数据文件夹")
         open_dir.clicked.connect(lambda: os.startfile(self.ctx.data_dir))
-        layout.addWidget(open_dir)
-        layout.addWidget(QLabel("词库"))
+        open_row = QHBoxLayout()
+        open_row.addWidget(open_dir)
+        open_row.addStretch(1)
+        data_layout.addLayout(open_row)
         self.decks = QListWidget()
         self.decks.setMinimumHeight(96)
-        layout.addWidget(self.decks, 1)
+        data_layout.addWidget(self.decks)
         deck_row = QHBoxLayout()
         for label, slot in (("新建词库", self._add_deck), ("删除所选词库", self._delete_deck)):
             button = QPushButton(label)
             button.clicked.connect(slot)
             deck_row.addWidget(button)
         deck_row.addStretch(1)
-        layout.addLayout(deck_row)
-        data_row = QHBoxLayout()
-        for label, slot in (
+        data_layout.addLayout(deck_row)
+        data_actions = QGridLayout()
+        for index, (label, slot) in enumerate((
             ("导出 CSV", self._export_csv),
             ("导出 JSON", self._export_json),
             ("导入词表", self._import_table),
             ("立即备份", self._backup),
             ("恢复备份", self._restore),
-        ):
+        )):
             button = QPushButton(label)
             button.clicked.connect(slot)
-            data_row.addWidget(button)
-        layout.addLayout(data_row)
-        layout.addWidget(QLabel("恢复前会先自动另存当前数据库。自动备份每天保留一份，最多 10 份。"))
+            data_actions.addWidget(button, index // 3, index % 3)
+        data_layout.addLayout(data_actions)
+        note = QLabel("恢复前会先另存当前数据库。自动备份每天保留一份，最多 10 份。")
+        note.setWordWrap(True)
+        note.setObjectName("muted")
+        data_layout.addWidget(note)
+        layout.addWidget(data_card)
+        layout.addWidget(shortcuts_card)
+        layout.addStretch(1)
 
     def on_show(self) -> None:
         self._set_combo(self.theme, self.ctx.settings.get("theme", "light"))
@@ -167,12 +203,14 @@ class SettingsPage(QWidget):
         self.voice.blockSignals(False)
         self.speech_label.setText(self.ctx.speech.error or f"可用英语语音 {self.ctx.speech.english_voices().__len__()} 个。")
         if self.ctx.dictionary.available:
-            self.dict_label.setText(
-                f"本地词典已加载：{self.ctx.dictionary.entry_count} 个词条。{self.ctx.dictionary.path}"
-            )
+            self.dict_label.setText(f"本地词典已加载 {self.ctx.dictionary.entry_count} 个词条")
+            self.dict_label.setToolTip(str(self.ctx.dictionary.path))
         else:
             self.dict_label.setText(f"本地词典未加载。{self.ctx.dictionary.error}")
-        self.data_label.setText(f"学习数据：{self.ctx.db_path}")
+            self.dict_label.setToolTip("")
+        self.data_path.setText(str(self.ctx.db_path))
+        self.data_path.setCursorPosition(0)
+        self.data_path.setToolTip(str(self.ctx.db_path))
         self.decks.clear()
         for deck in self.ctx.store.list_decks():
             suffix = "（默认）" if deck["is_default"] else ""
@@ -267,13 +305,19 @@ class SettingsPage(QWidget):
             return
         if not confirm(self, "恢复会替换当前学习数据。开始前会先自动保留一份当前数据。确定继续？"):
             return
+        if any(worker.isRunning() for worker in self.navigator.findChildren(CallWorker)):
+            tell(self, "后台任务正在运行。请在任务结束后恢复备份。", "warn")
+            return
         try:
             safety = restore_database(self.ctx.store, path, self.ctx.db_path, self.ctx.backup_path)
         except Exception as exc:
-            self.ctx.reopen_store()
-            tell(self, f"恢复失败，已尝试回到恢复前的数据。\n{exc}", "error")
+            tell(self, f"恢复失败。\n{exc}", "error")
             return
         self.ctx.reopen_store()
+        self.ctx.apply_speech()
+        self.navigator.apply_theme(self.ctx.settings.get("theme", "light"))
+        for key in ("placement", "learn", "review"):
+            self.navigator.pages[key].reset_after_restore()
         self.on_show()
         tell(self, f"已经恢复。恢复前的数据在：\n{safety}")
 

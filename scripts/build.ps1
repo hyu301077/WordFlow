@@ -6,8 +6,10 @@ Set-Location $Root
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
 if (-not (Test-Path $Python)) {
     py -3 -m venv (Join-Path $Root ".venv")
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 & $Python -m pip install -r (Join-Path $Root "requirements-dev.txt")
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $Dictionary = Join-Path $Root "data\ecdict.db"
 if (-not (Test-Path $Dictionary)) {
@@ -17,4 +19,5 @@ if (-not (Test-Path $Dictionary)) {
 }
 
 & $Python -m PyInstaller --noconfirm --clean (Join-Path $Root "packaging\wordflow.spec")
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Host "可执行文件：$(Join-Path $Root 'dist\WordFlow\WordFlow.exe')"
