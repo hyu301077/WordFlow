@@ -45,7 +45,7 @@ DWMWA_TEXT_COLOR = 36
 
 NAV_GROUPS = [
     ("学习", [("home", "首页"), ("plans", "学习计划"), ("placement", "摸底测试"), ("learn", "学习新词"), ("review", "今日复习")]),
-    ("资料", [("import", "导入文档"), ("articles", "英文文章"), ("listen", "语音朗读")]),
+    ("资料", [("import", "导入素材"), ("articles", "英文文章"), ("listen", "语音朗读")]),
     ("词库", [("learning", "生词本"), ("mastered", "熟词本"), ("mistakes", "错题本"), ("stats", "学习统计")]),
     ("更多", [("assistant", "在线助手"), ("settings", "设置")]),
 ]
@@ -94,6 +94,9 @@ class MainWindow(QMainWindow):
         self._build()
         self._tray()
         self.go("home")
+        coach = self.pages["home"].coach
+        coach.passage_finished.connect(self._coach_passage_finished)
+        QTimer.singleShot(0, coach, coach.sync)
 
     def _build(self) -> None:
         host = QWidget()
@@ -222,9 +225,18 @@ class MainWindow(QMainWindow):
         self.pages["listen"].open_folder(folder)
         self.go("listen")
 
-    def open_reader(self, document_id: int) -> None:
-        self.pages["reader"].load(document_id)
+    def open_reader(self, document_id: int, *, sentences: bool = False) -> None:
+        self.pages["reader"].load(document_id, sentences=sentences)
         self.go("reader")
+
+    def send_coach_passage(self, document_id: int, title: str, text: str) -> bool:
+        return self.pages["home"].coach.send(document_id, title, text)
+
+    def _coach_passage_finished(self, message: str) -> None:
+        reader = self.pages["reader"]
+        reader.set_coach_sending(False)
+        reader.notice.setTextFormat(Qt.PlainText)
+        reader.notice.setText(message)
 
     def open_learn_words(self, word_ids: list[int]) -> None:
         self.go("learn")
@@ -285,10 +297,14 @@ class MainWindow(QMainWindow):
             self.tray.showMessage("WordFlow", f"今天有 {data['due_total']} 个单词到了复习时间。", QSystemTrayIcon.Information, 4000)
 
     def closeEvent(self, event) -> None:
+        if self.pages["import"].cancel_on_close():
+            event.ignore()
+            return
         if self.pages["assistant"].cancel_talk_on_close():
             event.ignore()
             return
         self.ctx.settings.set("window_geometry", bytes(self.saveGeometry().toHex()).decode("ascii"))
+        self.pages["home"].coach.shutdown()
         for page in self.pages.values():
             shutdown = getattr(page, "shutdown", None)
             if shutdown:

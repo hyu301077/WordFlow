@@ -39,6 +39,7 @@ class AppContext:
         self.settings = Settings(self.store)
 
     def close(self) -> None:
+        self.speech.close()
         try:
             self.store.close()
         except Exception:

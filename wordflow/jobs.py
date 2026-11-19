@@ -26,7 +26,8 @@ def scan_documents(db_path, dict_path, root, mode, options, worker, ocr_max_page
         dictionary.close()
 
 
-def import_files(db_path, dict_path, paths, options, worker, ocr_max_pages: int = 40) -> ScanReport:
+def import_files(db_path, dict_path, paths, options, worker, ocr_max_pages: int = 40,
+                 *, data_dir=None, retry_document_id=None) -> ScanReport:
     store = Store(Path(db_path))
     dictionary = Dictionary(Path(dict_path) if dict_path else None)
     try:
@@ -34,15 +35,31 @@ def import_files(db_path, dict_path, paths, options, worker, ocr_max_pages: int 
         report = ScanReport()
         files = [Path(path) for path in paths]
         total = len(files)
+        if data_dir is not None:
+            from wordflow.materials import import_material_file, material_kind
+        retry = store.get_material(retry_document_id) if retry_document_id is not None else None
+        if retry_document_id is not None and retry is None:
+            raise ValueError("找不到要补齐的学习素材。")
         for index, path in enumerate(files, start=1):
             if worker.cancelled():
                 report.cancelled = True
                 break
             worker.progress.emit(index, total, path.name)
             try:
-                report.add(importer.import_file(path))
+                if data_dir is not None and (retry or material_kind(path)):
+                    def progress(message):
+                        worker.progress.emit(index - 1, total, f"{path.name} · {message}")
+
+                    item = import_material_file(importer, path, Path(data_dir), progress, worker.cancelled, retry)
+                else:
+                    item = importer.import_file(path)
+                report.add(item)
             except Exception as exc:
-                report.add(ImportResult("failed", str(exc), path=str(path)))
+                if not worker.cancelled():
+                    report.add(ImportResult("failed", str(exc), path=str(path)))
+            if worker.cancelled():
+                report.cancelled = True
+                break
         return report
     finally:
         store.close()

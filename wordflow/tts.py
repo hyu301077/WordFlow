@@ -28,10 +28,12 @@ class SpeechService:
         self.rate = 0
         self.volume = 80
         self._voice = None
+        self._com_initialized = False
         try:
             import pythoncom
 
-            pythoncom.CoInitialize()
+            pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
+            self._com_initialized = True
         except Exception:
             pass
         try:
@@ -45,6 +47,17 @@ class SpeechService:
         except Exception as exc:
             self.available = False
             self.error = f"{_NO_ENGINE}{exc}"
+
+    def close(self) -> None:
+        """在创建本语音服务的同一线程释放 SAPI 对象。"""
+        self._voice = None
+        self.voices.clear()
+        self.available = False
+        if self._com_initialized:
+            import pythoncom
+
+            pythoncom.CoUninitialize()
+            self._com_initialized = False
 
     def configure(self, pref: str, rate: int, volume: int) -> None:
         self.pref = pref or "en-US"

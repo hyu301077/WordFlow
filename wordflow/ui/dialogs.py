@@ -201,11 +201,11 @@ class WordDialog(QDialog):
             return client.complete(system, user)
 
         self._ai_worker = CallWorker(job, self)
-        self._ai_worker.succeeded.connect(lambda text: self._explain_done(lemma, sentence, text))
+        self._ai_worker.succeeded.connect(lambda text: self._explain_done(lemma, sentence, text, client.model))
         self._ai_worker.failed.connect(lambda message: tell(self, message, "error"))
         self._ai_worker.start()
 
-    def _explain_done(self, lemma: str, sentence: str, text: str) -> None:
+    def _explain_done(self, lemma: str, sentence: str, text: str, model: str) -> None:
         self.ai_note.setText("参考：" + text)
         word_id = self.detail["word"]["id"] if self.detail else None
         self.ctx.store.add_ai_record(
@@ -213,7 +213,7 @@ class WordDialog(QDialog):
             title=lemma,
             preview=sentence,
             content=text,
-            model=self.ctx.settings.get("ai_model", ""),
+            model=model,
             word_id=word_id,
         )
 

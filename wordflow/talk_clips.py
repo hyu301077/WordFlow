@@ -10,9 +10,12 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import wave
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
+
+from wordflow.paths import is_frozen
 
 _ABBREVIATIONS = (
     "Mr",
@@ -33,7 +36,7 @@ _ABBREVIATIONS = (
     "a.m",
     "p.m",
 )
-_MEDIA = {".mp4", ".mkv", ".mov", ".webm", ".mp3", ".wav", ".m4a", ".aac", ".flac"}
+MEDIA_EXTENSIONS = frozenset({".mp4", ".mkv", ".mov", ".webm", ".mp3", ".wav", ".m4a", ".aac", ".flac"})
 _PLACEHOLDER = "∯"
 
 
@@ -76,6 +79,38 @@ class TalkResult:
     merged: int
     translated: bool
     warning: str = ""
+    full_text: str = ""
+    pending_translations: int = 0
+
+
+@dataclass
+class _TalkMaterial:
+    title: str
+    paragraphs: list[str]
+    spans: list[Span]
+    translations: list[str]
+    merged: int
+
+    def save(self, folder: Path) -> None:
+        _write_json(folder / "output" / "material_talk.json", asdict(self))
+
+    @classmethod
+    def read(cls, folder: Path):
+        data = json.loads((folder / "output" / "material_talk.json").read_text(encoding="utf-8"))
+        data["spans"] = [Span(**row) for row in data["spans"]]
+        return cls(**data)
+
+
+def _write_json(path: Path, data) -> None:
+    _write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def _write_text(path: Path, content: str) -> None:
+    if path.is_file() and path.read_text(encoding="utf-8") == content:
+        return
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(content, encoding="utf-8")
+    temp.replace(path)
 
 
 def build_talk(
@@ -89,70 +124,114 @@ def build_talk(
     cancelled=None,
 ) -> TalkResult:
     source = Path(source)
-    if source.suffix.lower() not in _MEDIA or not source.is_file():
+    if source.suffix.lower() not in MEDIA_EXTENSIONS or not source.is_file():
         raise TalkError("请选择本机上的英语视频或音频文件。")
+    _check_stop(cancelled or (lambda: False))
+    folder = allocate_folder(Path(output_root), safe_folder_name(source, folder_name))
+    return prepare_material_talk(source, folder, model_size, model_dir, client, progress, cancelled, title=folder.name)
+
+
+def prepare_material_talk(
+    source: Path, folder: Path, model_size: str, model_dir: Path,
+    client=None, progress=None, cancelled=None, *, title: str = "",
+) -> TalkResult:
+    """在该来源专属的目录继续处理，保留已完成的识别、原声片段和译文。"""
+    source, folder = Path(source), Path(folder)
     report = progress or (lambda _message: None)
     stop = cancelled or (lambda: False)
     _check_stop(stop)
-    folder = allocate_folder(Path(output_root), safe_folder_name(source, folder_name))
     audio_dir = folder / "output"
     clip_dir = folder / "sentences_by_sentence"
     audio_dir.mkdir(parents=True, exist_ok=True)
-    clip_dir.mkdir(parents=True, exist_ok=True)
-    (folder / "source.txt").write_text(str(source.resolve()), encoding="utf-8")
+    if source.is_file():
+        if source.suffix.lower() not in MEDIA_EXTENSIONS:
+            raise TalkError("请选择本机上的英语视频或音频文件。")
+        _write_text(folder / "source.txt", str(source.resolve()))
     wav = folder / "talk.wav"
-    _check_stop(stop)
-    report("正在抽出音频。")
-    extract_wav(source, wav)
-    seconds = media_duration(wav)
-    report(f"音频约 {format_clock(seconds)}，开始识别英文。第一次使用会下载识别模型，只保存在这台电脑。")
-    segments, words = transcribe_wav(wav, model_size, Path(model_dir), report, stop)
-    (audio_dir / "word_timeline.json").write_text(
-        json.dumps(
-            {
-                "words": [{"text": word.text, "start": word.start, "end": word.end} for word in words],
-                "segments": [{"text": item.text, "start": item.start, "end": item.end} for item in segments],
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    full_text = " ".join(item.text.strip() for item in segments if item.text.strip())
-    paragraphs = paragraph_groups(segments)
-    sentences = split_sentences(full_text)
-    spans = align_sentences(sentences, _clip_timeline(segments, words))
-    if not spans:
-        raise TalkError("没有从这段音视频里识别出英文。")
-    merged, removed = merge_short_spans(spans)
-    _check_stop(stop)
-    warning = ""
-    translated = client is not None
-    if translated:
-        try:
-            translations = translate_spans(client, merged, report, stop)
-        except Exception as exc:
-            translations = ["待补充"] * len(merged)
-            translated = False
-            warning = f"中文译文没有完成，已写成「待补充」。{exc}"
+    if (audio_dir / "material_talk.json").is_file():
+        material = _TalkMaterial.read(folder)
     else:
-        translations = ["待补充"] * len(merged)
+        timeline = audio_dir / "word_timeline.json"
+        if timeline.is_file():
+            saved = json.loads(timeline.read_text(encoding="utf-8"))
+            segments = [Segment(**row) for row in saved["segments"]]
+            words = [TimedWord(**row) for row in saved["words"]]
+        else:
+            _ensure_wav(source, wav, report)
+            seconds = media_duration(wav)
+            report(f"音频约 {format_clock(seconds)}，正在准备本地英文识别。")
+            segments, words = transcribe_wav(wav, model_size, Path(model_dir), report, stop)
+            _write_json(timeline, {"words": [asdict(word) for word in words], "segments": [asdict(s) for s in segments]})
+        paragraphs = paragraph_groups(segments)
+        spans = align_sentences(split_sentences(" ".join(paragraphs)), _clip_timeline(segments, words))
+        if not spans:
+            raise TalkError("没有从这段音视频里识别出英文。")
+        merged, removed = merge_short_spans(spans)
+        material = _TalkMaterial(title or source.stem, paragraphs, merged, ["待补充"] * len(merged), removed)
+        material.save(folder)
     _check_stop(stop)
-    report(f"正在切出 {len(merged)} 段 MP3。")
-    export_mp3s(wav, merged, clip_dir, stop)
+    missing = sum(not _has_audio(clip_dir / f"{n:03d}.mp3") for n in range(1, len(material.spans) + 1))
+    if missing:
+        _ensure_wav(source, wav, report)
+        report(f"正在从原声补齐 {missing} 段 MP3。")
+        export_mp3s(wav, material.spans, clip_dir, stop, reuse=True)
     _check_stop(stop)
-    write_pack(folder, folder.name, paragraphs, merged, translations, translated)
-    long_clips = sum(1 for span in merged if span.duration >= 20)
+    return _finish_material(folder, material, client, report, stop)
+
+
+def _has_audio(path: Path) -> bool:
+    return path.is_file() and path.stat().st_size > 0
+
+
+def _ensure_wav(source: Path, wav: Path, progress) -> None:
+    if _has_audio(wav):
+        return
+    if not source.is_file():
+        raise TalkError("找不到原始音视频或缓存的原声，请重新选择原文件以补齐材料。")
+    progress("正在抽出音频。")
+    temp = wav.with_suffix(".part.wav")
+    extract_wav(source, temp)
+    temp.replace(wav)
+
+
+def enrich_material_talk(folder: Path, client, progress=None, cancelled=None) -> TalkResult:
+    """只补译缺少中文的句子，可在原文件已移动时使用。"""
+    folder = Path(folder)
+    if not (folder / "output" / "material_talk.json").is_file():
+        raise TalkError("尚未完成音视频识别，请先继续导入这份材料。")
+    return _finish_material(folder, _TalkMaterial.read(folder), client, progress or (lambda _: None), cancelled or (lambda: False))
+
+
+def _finish_material(folder: Path, material: _TalkMaterial, client, report, stop) -> TalkResult:
+    warning = ""
+    _check_stop(stop)
+    try:
+        if client is not None:
+            translate_spans(client, material.spans, report, stop, material.translations, lambda: material.save(folder))
+    except _TranslationError as exc:
+        warning = f"中文译文未补齐。{exc}"
+    finally:
+        pending = material.translations.count("待补充")
+        export_note = write_pack(folder, material.title, material.paragraphs, material.spans, material.translations, not pending)
+        warning = " ".join(filter(None, [warning, export_note]))
+    _check_stop(stop)
+    if pending and client is not None:
+        warning = f"{warning} 尚有 {pending} 句待补译。".strip()
+    long_clips = sum(1 for span in material.spans if span.duration >= 20)
     if long_clips:
         extra = f"有 {long_clips} 段超过 20 秒，仍按完整句子保留。"
         warning = f"{warning} {extra}".strip()
+    full_text = "\n\n".join(material.paragraphs)
     return TalkResult(
         folder=folder,
-        clips=len(merged),
+        clips=len(material.spans),
         english_words=len(full_text.split()),
-        chinese_chars=count_chinese(translations),
-        merged=removed,
-        translated=translated,
+        chinese_chars=count_chinese(material.translations),
+        merged=material.merged,
+        translated=not pending,
         warning=warning,
+        full_text=full_text,
+        pending_translations=pending,
     )
 
 
@@ -265,16 +344,35 @@ def merge_short_spans(spans: list[Span], word_limit: int = 3, second_limit: floa
     return merged, original - len(merged)
 
 
-def translate_spans(client, spans: list[Span], progress, cancelled) -> list[str]:
-    results = ["待补充"] * len(spans)
-    batch = 12
-    for offset in range(0, len(spans), batch):
+class _TranslationError(TalkError):
+    pass
+
+
+def translate_spans(client, spans: list[Span], progress, cancelled, results=None, save=None) -> list[str]:
+    if results is None:
+        results = ["待补充"] * len(spans)
+    offset = 0
+    while offset < len(spans):
         _check_stop(cancelled)
-        chunk = spans[offset : offset + batch]
-        progress(f"正在翻译第 {offset + 1}–{offset + len(chunk)} 句，共 {len(spans)} 句。")
+        if results[offset] != "待补充":
+            offset += 1
+            continue
+        end = offset + 1
+        while end < min(offset + 12, len(spans)) and results[end] == "待补充":
+            end += 1
+        chunk = spans[offset:end]
+        progress(f"正在翻译第 {offset + 1}–{end} 句，共 {len(spans)} 句。")
         system, user = translation_prompt(offset, chunk)
-        parsed = parse_translations(client.complete(system, user, timeout=120), offset, len(chunk))
-        results[offset : offset + len(chunk)] = parsed
+        try:
+            reply = client.complete(system, user, timeout=120)
+            parsed = parse_translations(reply, offset, len(chunk))
+        except Exception as exc:
+            _check_stop(cancelled)
+            raise _TranslationError(str(exc)) from exc
+        results[offset:end] = [line if count_chinese([line]) else "待补充" for line in parsed]
+        if save:
+            save()
+        offset = end
     return results
 
 
@@ -307,17 +405,17 @@ def write_pack(
     spans: list[Span],
     translations: list[str],
     translated: bool,
-) -> None:
+) -> str:
     output = folder / "output"
     clips = folder / "sentences_by_sentence"
     output.mkdir(parents=True, exist_ok=True)
     clips.mkdir(parents=True, exist_ok=True)
     english = _english_document(title, paragraphs)
     bilingual = _bilingual_document(title, spans, translations, translated)
-    (output / "ted_english.md").write_text(english, encoding="utf-8")
-    (output / "ted_bilingual.md").write_text(bilingual, encoding="utf-8")
-    _write_docx(output / "ted_english.docx", title, english.split("\n\n"))
-    _write_docx(output / "ted_bilingual.docx", title, bilingual.split("\n\n"))
+    notes = [
+        _write_transcript(output / "ted_english.md", title, english),
+        _write_transcript(output / "ted_bilingual.md", title, bilingual),
+    ]
     rows = []
     index_lines = ["| 序号 | 开始 | 结束 | 时长 | 英文 | 备注 |", "| --- | --- | --- | --- | --- | --- |"]
     for index, span in enumerate(spans, start=1):
@@ -331,22 +429,27 @@ def write_pack(
                 "end": round(span.end, 3),
                 "duration": round(span.duration, 3),
                 "text": span.text,
+                "translation": translations[index - 1] if index <= len(translations) else "待补充",
                 "note": span.note,
             }
         )
         index_lines.append(
             f"| {number} | {span.start:.2f} | {span.end:.2f} | {span.duration:.2f} | {span.text.replace('|', '/')} | {span.note} |"
         )
-    (clips / "index.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
-    (clips / "index.md").write_text("\n".join(index_lines) + "\n", encoding="utf-8")
+    _write_json(clips / "index.json", rows)
+    _write_text(clips / "index.md", "\n".join(index_lines) + "\n")
+    return " ".join(filter(None, notes))
 
 
-def export_mp3s(wav: Path, spans: list[Span], clip_dir: Path, cancelled=None) -> None:
+def export_mp3s(wav: Path, spans: list[Span], clip_dir: Path, cancelled=None, *, reuse: bool = False) -> None:
     clip_dir.mkdir(parents=True, exist_ok=True)
     for index, span in enumerate(spans, start=1):
         _check_stop(cancelled or (lambda: False))
         number = f"{index:03d}"
         destination = clip_dir / f"{number}.mp3"
+        if reuse and _has_audio(destination):
+            continue
+        temp = clip_dir / f".{number}.part"
         _run(
             [
                 ffmpeg_exe(),
@@ -364,9 +467,12 @@ def export_mp3s(wav: Path, spans: list[Span], clip_dir: Path, cancelled=None) ->
                 "44100",
                 "-b:a",
                 "128k",
-                str(destination),
+                "-f",
+                "mp3",
+                str(temp),
             ]
         )
+        temp.replace(destination)
 
 
 def extract_wav(source: Path, destination: Path) -> None:
@@ -398,6 +504,29 @@ def media_duration(path: Path) -> float:
     return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
+def _whisper_audio(wav: Path, cancelled):
+    import numpy as np
+
+    _check_stop(cancelled)
+    command = [ffmpeg_exe(), "-nostdin", "-loglevel", "error", "-i", str(wav),
+               "-map", "0:a:0", "-ac", "1", "-ar", "16000", "-f", "f32le", "pipe:1"]
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=_flags()) as process:
+        while True:
+            if cancelled():
+                process.kill()
+                process.communicate()
+                raise TalkError("已取消。")
+            try:
+                audio, errors = process.communicate(timeout=0.3)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    if process.returncode or not audio or len(audio) % 4:
+        detail = errors.decode("utf-8", errors="replace").strip()
+        raise TalkError(f"原声音频解码失败。{detail or '没有得到可识别的音频。'}")
+    return np.frombuffer(audio, dtype="<f4")
+
+
 def transcribe_wav(wav: Path, model_size: str, model_dir: Path, progress, cancelled) -> tuple[list[Segment], list[TimedWord]]:
     if model_size not in {"small", "medium"}:
         model_size = "small"
@@ -406,9 +535,25 @@ def transcribe_wav(wav: Path, model_size: str, model_dir: Path, progress, cancel
     except ImportError as exc:
         raise TalkError("还没有安装本地识别组件，暂时不能整理视频。") from exc
     model_dir.mkdir(parents=True, exist_ok=True)
-    progress("正在加载识别模型。")
-    model = WhisperModel(model_size, device="cpu", compute_type="int8", download_root=str(model_dir))
-    iterator, _info = model.transcribe(str(wav), language="en", word_timestamps=True, vad_filter=False, beam_size=5)
+    candidates = [model_dir / model_size]
+    if is_frozen():
+        candidates.append(Path(sys.executable).parent / "models" / model_size)
+    required = ("model.bin", "config.json", "tokenizer.json")
+    local = next((path for path in candidates if all((path / name).is_file() for name in required)), None)
+    if local:
+        progress(f"正在加载本机识别模型 {model_size}。")
+    else:
+        progress(f"正在加载识别模型 {model_size}。首次使用需要联网下载。")
+    try:
+        model = WhisperModel(str(local or model_size), device="cpu", compute_type="int8",
+                             download_root=str(model_dir), local_files_only=local is not None)
+    except Exception as exc:
+        locations = " 或 ".join(str(path) for path in candidates)
+        raise TalkError(f"语音识别模型 {model_size} 加载失败。请检查网络，或将完整的离线模型放入 {locations}。{exc}") from exc
+    # 直接传入 Whisper 要求的 16 kHz 原声，避开 PyAV 各版本不同的文件解码接口。
+    audio = _whisper_audio(wav, cancelled)
+    _check_stop(cancelled)
+    iterator, _info = model.transcribe(audio, language="en", word_timestamps=True, vad_filter=False, beam_size=5)
     segments: list[Segment] = []
     words: list[TimedWord] = []
     for piece in iterator:
@@ -458,7 +603,9 @@ def _english_document(title: str, paragraphs: list[str]) -> str:
 
 
 def _bilingual_document(title: str, spans: list[Span], translations: list[str], translated: bool) -> str:
-    notice = "中文是在线模型给出的参考译文，不会写入词典，也不会当作测验答案。" if translated else "这次没有调用在线助手，中文均记为「待补充」。"
+    notice = "中文是在线模型给出的参考译文。"
+    if not translated:
+        notice += " 标记为「待补充」的句子可以稍后补译。"
     blocks = [f"# {title}", notice]
     for index, span in enumerate(spans):
         chinese = translations[index].strip() if index < len(translations) and translations[index].strip() else "待补充"
@@ -476,6 +623,22 @@ def _write_docx(path: Path, title: str, blocks: list[str]) -> None:
         if text and text != f"# {title}":
             document.add_paragraph(text)
     document.save(path)
+
+
+def _write_transcript(markdown: Path, title: str, content: str) -> str:
+    docx = markdown.with_suffix(".docx")
+    docx_temp = markdown.with_suffix(".part.docx")
+    if docx.is_file() and not docx_temp.exists() and markdown.is_file() and markdown.read_text(encoding="utf-8") == content:
+        return ""
+    _write_docx(docx_temp, title, content.split("\n\n"))
+    try:
+        docx_temp.replace(docx)
+    except PermissionError:
+        # 暂存文件会让下次重试重新发布 DOCX，即使 Markdown 已经更新。
+        _write_text(markdown, content)
+        return f"未能更新 {docx.name}，请关闭占用文档的程序后点「补齐素材」。"
+    _write_text(markdown, content)
+    return ""
 
 
 def _merge_until(spans: list[Span], is_short, stage: str) -> list[Span]:

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from wordflow.extract import ExtractOptions, extract_words
 from wordflow.parsers import parse_path
@@ -227,6 +228,50 @@ class Importer:
             warning="",
         )
 
+    def import_material(
+        self,
+        title: str,
+        text: str,
+        fingerprint: str,
+        source_path: Path | str | None,
+        material_kind: str,
+        pack_path: Path | str,
+    ) -> ImportResult:
+        """将已提取的原始英文和素材包作为一份学习计划发布。"""
+        relative_pack = PureWindowsPath(pack_path)
+        if relative_pack.anchor or not relative_pack.parts or ".." in relative_pack.parts:
+            raise ValueError("素材目录必须是数据目录下的相对路径")
+        if not fingerprint:
+            raise ValueError("缺少素材指纹")
+        source = str(Path(source_path).resolve()) if source_path else None
+        with self.store.tx():
+            existing = self.store.find_material(fingerprint)
+            if existing:
+                document_id = existing["document_id"]
+                document = self.store.get_document(document_id)
+                if not document["study_plan"]:
+                    self.store.set_study_plan(document_id, True)
+                if source and source != existing["source_path"]:
+                    self.store.update_material_source(document_id, source)
+                return ImportResult(
+                    "skipped", "已打开已有学习计划", path=source or "", document_id=document_id,
+                    unique_words=document["unique_count"], total_tokens=document["word_count"], duplicate=True,
+                )
+            text = text.replace("\r\n", "\n").strip()
+            if not re.search(r"[A-Za-z]", text):
+                return ImportResult("failed", "素材中未提取到英文", path=source or "")
+            result = self._import_text(
+                title=title.strip() or _title_from_text(text), text=text, kind="material",
+                path=None, key=None, tags=None, fingerprint=None, size=None, mtime=None,
+                existing=None, warning="", require_words=material_kind in {"image", "screenshot"},
+            )
+            result.path = source or ""
+            if result.document_id is None:
+                return result
+            self.store.link_material(result.document_id, fingerprint, source, material_kind, relative_pack.as_posix())
+            self.store.set_study_plan(result.document_id)
+            return result
+
     def _import_text(
         self,
         *,
@@ -236,13 +281,16 @@ class Importer:
         path: Path | None,
         key: str | None,
         tags: str | None,
-        fingerprint: str,
+        fingerprint: str | None,
         size: int | None,
         mtime: int | None,
         existing: dict | None,
         warning: str,
+        require_words: bool = False,
     ) -> ImportResult:
         words, total_tokens = extract_words(text, self.options, self.dictionary)
+        if require_words and not words:
+            return ImportResult("failed", "未提取到适合学习的英文单词")
         now = to_iso(now_local())
         with self.store.tx():
             document_id = self.store.upsert_document(

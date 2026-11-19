@@ -5,6 +5,7 @@ from pathlib import Path
 
 from wordflow.collocation import blank_sentence, phrases_in_sentences
 from wordflow.constants import STATUS_LEARNING, STATUS_REVIEWING
+from wordflow.db import SCHEMA_VERSION
 from wordflow.dictionary import Dictionary
 from wordflow.extract import ExtractOptions
 from wordflow.gloss import norm_gloss
@@ -103,7 +104,7 @@ def test_undo_forecast_cloze_listen_and_leech_queue(tmp_path: Path):
         encoding="utf-8",
     )
     Importer(store, dictionary, ExtractOptions()).import_file(story, kind="article")
-    assert store.conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert store.conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     service = StudyService(store, dictionary)
     abandon = store.get_word_by_lemma("abandon")
     apple = store.get_word_by_lemma("apple")

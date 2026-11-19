@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
-from PySide6.QtCore import QAbstractTableModel, Qt
+from PySide6.QtCore import QAbstractTableModel, QBuffer, QIODevice, QSaveFile, QTimer, Qt
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -22,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from wordflow.jobs import import_files
+from wordflow.materials import IMAGE_EXTENSIONS, MEDIA_EXTENSIONS, has_media_source_cache, material_folder
 from wordflow.ui.common import format_phonetic, page_header, status_text, tell
 from wordflow.ui.dialogs import WordDialog
 from wordflow.ui.workers import CallWorker
@@ -70,20 +75,27 @@ class ImportPage(QWidget):
         self.navigator = navigator
         self.worker: CallWorker | None = None
         self.files: list[Path] = []
+        self.retry_document_id = None
+        self.close_after_import = False
         layout = QVBoxLayout(self)
         layout.addWidget(
             page_header(
-                "导入文档",
-                "直接选择 txt、md、docx 或 PDF，可以一次选多份。"
-                "扫描版 PDF 会在本机用 Windows OCR 识别，不会上传。",
+                "导入素材",
+                "音视频和截图会自动生成学习计划。也可以导入 TXT、Markdown、Word 和 PDF。",
             )
         )
         row = QHBoxLayout()
         self.path_label = QLabel("还没有选择文件")
         self.path_label.setWordWrap(True)
-        browse = QPushButton("选择文件")
-        browse.clicked.connect(self._browse)
-        row.addWidget(browse)
+        self.browse = QPushButton("选择文件")
+        self.browse.clicked.connect(self._browse)
+        self.paste = QPushButton("粘贴截图")
+        self.paste.clicked.connect(self._paste)
+        self.paste_key = QShortcut(QKeySequence.Paste, self)
+        self.paste_key.setContext(Qt.WidgetWithChildrenShortcut)
+        self.paste_key.activated.connect(self._paste)
+        row.addWidget(self.browse)
+        row.addWidget(self.paste)
         row.addWidget(self.path_label, 1)
         layout.addLayout(row)
         mode_row = QHBoxLayout()
@@ -149,17 +161,32 @@ class ImportPage(QWidget):
         self.ocr_pages.blockSignals(True)
         self.ocr_pages.setValue(self.ctx.settings.integer("ocr_max_pages", 40))
         self.ocr_pages.blockSignals(False)
+        if not self.files:
+            try:
+                paths = json.loads(self.ctx.settings.get("unfinished_material_import", "[]"))
+                if isinstance(paths, list):
+                    self.files = [Path(raw) for raw in paths if isinstance(raw, str) and Path(raw).is_file()]
+            except (ValueError, OSError):
+                self.files = []
+            if self.files:
+                self._show_files()
+                self.status.setText("上次导入尚未完成，点「开始导入」继续。")
 
     def _browse(self) -> None:
         paths, _filter = QFileDialog.getOpenFileNames(
             self,
-            "选择要导入的文档",
+            "选择要导入的素材",
             "",
-            "文档 (*.txt *.md *.markdown *.docx *.pdf)",
+            "学习素材 (*.txt *.md *.markdown *.docx *.pdf " +
+            " ".join("*" + ext for ext in sorted(IMAGE_EXTENSIONS | MEDIA_EXTENSIONS)) + ")",
         )
         if not paths:
             return
         self.files = [Path(path) for path in paths]
+        self.retry_document_id = None
+        self._show_files()
+
+    def _show_files(self) -> None:
         if len(self.files) == 1:
             shown = str(self.files[0])
         else:
@@ -169,35 +196,92 @@ class ImportPage(QWidget):
                 shown += "…"
         self.path_label.setText(shown)
 
+    def _paste(self) -> None:
+        if self.worker and self.worker.isRunning():
+            return
+        image = QApplication.clipboard().image()
+        if image.isNull():
+            tell(self, "剪贴板里没有图片。请先复制一张截图。", "warn")
+            return
+        buffer = QBuffer()
+        buffer.open(QIODevice.WriteOnly)
+        if not image.save(buffer, "PNG"):
+            tell(self, "截图无法转换为 PNG 图片。", "warn")
+            return
+        raw = bytes(buffer.data())
+        name = hashlib.sha256(raw).hexdigest()
+        path = self.ctx.data_dir / "screenshots" / f"截图-{name}.png"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                output = QSaveFile(str(path))
+                if not output.open(QIODevice.WriteOnly) or output.write(raw) != len(raw) or not output.commit():
+                    raise OSError(output.errorString())
+        except OSError as exc:
+            tell(self, f"无法保存剪贴板截图。{exc}", "warn")
+            return
+        self.retry_document_id = None
+        self.files = [path]
+        self._show_files()
+        self._start()
+
+    def resume_material(self, document_id: int) -> None:
+        if self.worker and self.worker.isRunning():
+            tell(self, "素材导入仍在进行，请等待当前任务完成。", "warn")
+            return
+        material = self.ctx.store.get_material(document_id)
+        if not material:
+            return
+        source = Path(material["source_path"] or "")
+        folder = material_folder(self.ctx.data_dir, material["pack_path"])
+        cached = material["material_kind"] == "image" or has_media_source_cache(folder)
+        if not source.is_file() and not cached:
+            raw, _ = QFileDialog.getOpenFileName(self, "重新关联这份计划的原文件")
+            if not raw:
+                return
+            source = Path(raw)
+        self.retry_document_id = document_id
+        self.files = [source]
+        self._show_files()
+        self._start()
+
     def _start(self) -> None:
         if self.worker and self.worker.isRunning():
             return
-        missing = [path for path in self.files if not path.is_file()]
-        if not self.files or missing:
-            tell(self, "请先选择存在的文档。", "warn")
+        if not self.files:
+            tell(self, "请先选择素材或粘贴截图。", "warn")
             return
         self.log.clear()
         self._clear_words()
         self.progress.setValue(0)
         self.start_button.setEnabled(False)
+        self.browse.setEnabled(False)
+        self.paste.setEnabled(False)
         self.cancel_button.setEnabled(True)
         options = self.ctx.settings.extract_options()
+        pages = self.ctx.settings.integer("ocr_max_pages", 40)
+        paths = tuple(self.files)
+        retry = self.retry_document_id
+        if retry is None:
+            self.ctx.settings.set("unfinished_material_import", json.dumps([str(p) for p in paths]))
 
         def job(worker):
-            pages = self.ctx.settings.integer("ocr_max_pages", 40)
             return import_files(
                 self.ctx.db_path,
                 self.ctx.dict_path,
-                self.files,
+                paths,
                 options,
                 worker,
                 ocr_max_pages=pages,
+                data_dir=self.ctx.data_dir,
+                retry_document_id=retry,
             )
 
         self.worker = CallWorker(job, self)
         self.worker.progress.connect(self._progress)
         self.worker.succeeded.connect(self._done)
         self.worker.failed.connect(self._failed)
+        self.worker.finished.connect(self._finished)
         self.worker.start()
 
     def _progress(self, current: int, total: int, label: str) -> None:
@@ -215,7 +299,7 @@ class ImportPage(QWidget):
             extra = f"，词条 {item.unique_words}" if item.unique_words else ""
             lines.append(f"[{prefix}] {item.path or item.message} {item.message}{extra}")
         if not report.files:
-            lines.append("没有找到 txt、md、docx 或 pdf。请确认扫描方式是否匹配目录结构。")
+            lines.append("没有已完成的素材。")
         if report.cancelled:
             lines.append("已取消。取消前处理完的文件已经保存。")
         self.log.setPlainText("\n".join(lines))
@@ -224,6 +308,12 @@ class ImportPage(QWidget):
             f"跳过 {report.count('skipped')}，失败 {report.count('failed')}。"
         )
         self._fill_documents(report)
+        if self.retry_document_id is None:
+            complete = {item.path for item in report.files if item.status != "failed"}
+            unfinished = [str(path) for path in self.files if str(path) not in complete and path.is_file()]
+            self.ctx.settings.set("unfinished_material_import", json.dumps(unfinished))
+        if not report.cancelled:
+            self.progress.setValue(self.progress.maximum())
 
     def _clear_words(self) -> None:
         self.doc_picker.blockSignals(True)
@@ -266,12 +356,18 @@ class ImportPage(QWidget):
         document = self.ctx.store.get_document(int(document_id))
         title = document["title"] if document else "这份文档"
         planned = "已在学习计划中。" if document and int(document.get("study_plan") or 0) else "可导入学习计划。"
+        self.plan_button.setText("打开学习计划" if document and document.get("study_plan") else "导入学习计划")
         self.word_count.setText(f"{title} 检出 {len(rows)} 个单词。{planned}词典没有释义的显示为待补充。")
 
     def _import_plan(self) -> None:
         document_id = self.doc_picker.currentData()
         if not document_id:
             tell(self, "请先导入文档，并在下方选中它。", "warn")
+            return
+        document = self.ctx.store.get_document(int(document_id))
+        if document and document.get("study_plan"):
+            self.navigator.go("plans")
+            self.navigator.pages["plans"].select_plan(int(document_id))
             return
         rows = self.ctx.store.document_words(int(document_id))
         if not rows:
@@ -299,6 +395,20 @@ class ImportPage(QWidget):
         if self.worker:
             self.worker.cancel()
             self.status.setText("正在取消，当前文件处理完后停止。")
+
+    def cancel_on_close(self) -> bool:
+        if self.worker and self.worker.isRunning():
+            self.close_after_import = True
+            self._cancel()
+            return True
+        return False
+
+    def _finished(self) -> None:
+        self.browse.setEnabled(True)
+        self.paste.setEnabled(True)
+        if self.close_after_import:
+            self.close_after_import = False
+            QTimer.singleShot(0, self.navigator.close)
 
     def shutdown(self) -> None:
         if self.worker and self.worker.isRunning():

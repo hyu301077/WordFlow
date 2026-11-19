@@ -59,7 +59,7 @@ def test_window_pages_open(desktop):
     assert window.height() == 600
     window.go("home")
     dashboard = window.pages["home"]
-    assert dashboard.actions[0].text() == "导入文档"
+    assert dashboard.actions[0].text() == "导入素材"
     assert dashboard.charts.direction() == QBoxLayout.TopToBottom
     window.resize(1460, 960)
     application.processEvents()

@@ -3,6 +3,7 @@ import sqlite3
 import pytest
 
 from wordflow.backup import BackupError, backup_database, restore_database, validate_backup
+from wordflow.db import SCHEMA_VERSION
 from wordflow.store import Store
 
 
@@ -11,7 +12,7 @@ def test_backup_roundtrip_and_reject_bad_file(tmp_path):
     store.set_setting("theme", "dark")
     dest = tmp_path / "backups" / "one.db"
     backup_database(store, dest)
-    assert validate_backup(dest) == 4
+    assert validate_backup(dest) == SCHEMA_VERSION
     store.set_setting("theme", "light")
     safety = restore_database(store, dest, tmp_path / "app.db", tmp_path / "backups")
     assert safety.exists()

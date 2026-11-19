@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from wordflow.ui.chart import BarChart
+from wordflow.ui.coach_records import CoachRecordsWidget
 from wordflow.ui.common import card, fill_study_plan_combo, page_header, section_title, stat_card
 
 
@@ -123,6 +124,8 @@ class DashboardPage(QWidget):
         for column in range(3):
             grid.setColumnStretch(column, 1)
         layout.addLayout(grid)
+        self.coach = CoachRecordsWidget(ctx, self)
+        layout.addWidget(self.coach)
         self.charts = QBoxLayout(QBoxLayout.LeftToRight)
         self.charts.setSpacing(12)
         self.chart = BarChart(empty_text="这 7 天还没有练习记录")
@@ -160,6 +163,7 @@ class DashboardPage(QWidget):
         return frame
 
     def on_show(self) -> None:
+        self.coach.refresh(self.coach.page_id())
         fill_study_plan_combo(self.plan, self.ctx.store, self.plan.currentData(), all_label="全部")
         plan_id = self.plan.currentData()
         self.plan.setToolTip(self.plan.currentText())
@@ -177,7 +181,7 @@ class DashboardPage(QWidget):
             else:
                 routes = ["plans", "review", "learn"]
         labels = {"review": "开始复习", "learn": "学习新词", "placement": "摸底测试",
-                  "import": "导入文档", "articles": "英文文章", "plans": "学习计划"}
+                  "import": "导入素材", "articles": "英文文章", "plans": "学习计划"}
         for button, route in zip(self.actions, routes):
             button.setProperty("route", route)
             button.setText(labels[route])

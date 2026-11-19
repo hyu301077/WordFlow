@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QAbstractTableModel, Qt
+from PySide6.QtCore import QAbstractTableModel, Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from wordflow.ui.common import fill_study_plan_combo, format_phonetic, page_header, status_text, tell
+from wordflow.materials import material_folder, sentence_rows
 
 
 class PlanWordModel(QAbstractTableModel):
@@ -99,6 +101,24 @@ class PlanPage(QWidget):
             actions.addWidget(button)
         actions.addStretch(1)
         layout.addLayout(actions)
+        self.material_actions = QWidget()
+        media_bar = QHBoxLayout(self.material_actions)
+        media_bar.setContentsMargins(0, 0, 0, 0)
+        self.sentences = QPushButton("中英对照")
+        self.sentences.clicked.connect(self._sentences)
+        self.listen = QPushButton("逐句朗读")
+        self.listen.clicked.connect(self._listen)
+        repair = QPushButton("补齐素材")
+        repair.clicked.connect(self._resume)
+        self.exports = QPushButton("文稿目录")
+        self.exports.clicked.connect(self._open_exports)
+        self.material_status = QLabel()
+        self.material_status.setWordWrap(True)
+        for button in (self.sentences, self.listen, self.exports, repair):
+            media_bar.addWidget(button)
+        media_bar.addWidget(self.material_status, 1)
+        layout.addWidget(self.material_actions)
+        self.material_actions.hide()
         self.model = PlanWordModel()
         self.view = QTableView()
         self.view.setModel(self.model)
@@ -168,13 +188,40 @@ class PlanPage(QWidget):
 
     def _reload(self) -> None:
         plan_id = self.plan.currentData()
+        rows = self.ctx.store.document_words(int(plan_id)) if plan_id else []
+        material = self.ctx.store.get_material(int(plan_id)) if plan_id else None
+        self.material_actions.setVisible(bool(material))
+        if material:
+            folder = material_folder(self.ctx.data_dir, material["pack_path"])
+            clips = sentence_rows(folder)
+            audio_dir = folder / "sentences_by_sentence"
+            count = sum(1 for row in clips if str(row.get("id", "")).isdigit()
+                        and (audio_dir / f"{row['id']}.mp3").is_file())
+            self.listen.setEnabled(count > 0)
+            image = material["material_kind"] == "image"
+            self.exports.setVisible(not image)
+            self.exports.setEnabled((folder / "output").is_dir())
+            self.sentences.setText("练习例句" if image else "中英对照")
+            self.sentences.setEnabled(bool(clips))
+            pending = sum(1 for row in clips if row.get("translation") in (None, "", "待补充"))
+            message = f"{len(clips)} 句 · {count} 段音频"
+            if image:
+                targets = {row["lemma"] for row in rows if row["status"] != "mastered"}
+                targets = targets or {row["lemma"] for row in rows}
+                missing = targets - {clip.get("target") for clip in clips}
+                if missing:
+                    message += f" · {len(missing)} 个词待生成例句"
+            if pending:
+                message += f" · {pending} 句待译"
+            if not clips or count < len(clips):
+                message += " · 可点「补齐素材」生成或找回缺项"
+            self.material_status.setText(message)
         if not plan_id:
             self.model.set_rows([])
             self.bar.setRange(0, 1)
             self.bar.setValue(0)
             self.progress_label.setText("还没有学习计划。导入文档或英文文章后，点「导入学习计划」。")
             return
-        rows = self.ctx.store.document_words(int(plan_id))
         rows.sort(key=lambda row: (row.get("status") == "mastered", -(row.get("frequency") or 0), row["lemma"]))
         self.model.set_rows(rows)
         total = len(rows)
@@ -225,6 +272,31 @@ class PlanPage(QWidget):
         plan_id = self._selected()
         if plan_id:
             self.navigator.open_reader(plan_id)
+
+    def _sentences(self) -> None:
+        plan_id = self._selected()
+        if plan_id:
+            self.navigator.open_reader(plan_id, sentences=True)
+
+    def _listen(self) -> None:
+        plan_id = self._selected()
+        material = self.ctx.store.get_material(plan_id) if plan_id else None
+        if material:
+            folder = material_folder(self.ctx.data_dir, material["pack_path"])
+            self.navigator.open_listen(folder / "sentences_by_sentence")
+
+    def _resume(self) -> None:
+        plan_id = self._selected()
+        if plan_id:
+            self.navigator.go("import")
+            self.navigator.pages["import"].resume_material(plan_id)
+
+    def _open_exports(self) -> None:
+        material = self.ctx.store.get_material(self.plan.currentData())
+        if material:
+            output = material_folder(self.ctx.data_dir, material["pack_path"]) / "output"
+            if not output.is_dir() or not QDesktopServices.openUrl(QUrl.fromLocalFile(str(output))):
+                tell(self, "无法打开文稿目录，请点「补齐素材」重新生成。", "warn")
 
     def _remove(self) -> None:
         plan_id = self._selected()

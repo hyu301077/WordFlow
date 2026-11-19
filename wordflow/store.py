@@ -151,6 +151,31 @@ class Store:
     def get_document(self, document_id: int) -> dict | None:
         return self._one("SELECT * FROM documents WHERE id = ?", (document_id,))
 
+    def get_material(self, document_id: int) -> dict | None:
+        return self._one("SELECT * FROM study_materials WHERE document_id = ?", (document_id,))
+
+    def find_material(self, fingerprint: str) -> dict | None:
+        return self._one("SELECT * FROM study_materials WHERE fingerprint = ?", (fingerprint,))
+
+    def link_material(
+        self, document_id: int, fingerprint: str, source_path: str | None, material_kind: str, pack_path: str
+    ) -> None:
+        with self._guard():
+            self.conn.execute(
+                """
+                INSERT INTO study_materials(document_id, fingerprint, source_path, material_kind, pack_path)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (document_id, fingerprint, source_path, material_kind, pack_path),
+            )
+
+    def update_material_source(self, document_id: int, source_path: str) -> None:
+        with self._guard():
+            self.conn.execute(
+                "UPDATE study_materials SET source_path = ? WHERE document_id = ?",
+                (source_path, document_id),
+            )
+
     def list_study_plans(self) -> list[dict]:
         return self._all(
             "SELECT * FROM documents WHERE study_plan = 1 ORDER BY updated_at DESC, id DESC"
@@ -580,6 +605,24 @@ class Store:
                 (kind, word_id, title[:200], preview[:500], content, model[:120], to_iso(now_local())),
             )
             return int(cursor.lastrowid)
+
+    def save_coach_records(self, page_id: str, records: list[dict]) -> None:
+        """原子替换目标 Page 的完整课后记录，同一天内保留页面顺序。"""
+        snapshot = sorted(records, key=lambda row: row["day"], reverse=True)
+        with self._guard():
+            if snapshot == self.list_coach_records(page_id):
+                return
+            self.conn.execute("DELETE FROM coach_records WHERE page_id = ?", (page_id,))
+            self.conn.executemany(
+                "INSERT INTO coach_records(page_id, block_id, day, content) VALUES (?, ?, ?, ?)",
+                ((page_id, row["block_id"], row["day"], row["content"]) for row in snapshot),
+            )
+
+    def list_coach_records(self, page_id: str) -> list[dict]:
+        return self._all(
+            "SELECT block_id, day, content FROM coach_records WHERE page_id = ? ORDER BY day DESC, id",
+            (page_id,),
+        )
 
     def recent_ai_records(self, limit: int = 30) -> list[dict]:
         return self._all(

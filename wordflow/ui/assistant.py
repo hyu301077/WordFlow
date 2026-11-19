@@ -1,4 +1,4 @@
-"""可选在线助手。请求只在用户点击后发出，结果不进入词典和测验。"""
+"""在线助手设置、素材授权与可选的学习辅助。"""
 
 from __future__ import annotations
 
@@ -22,13 +22,18 @@ from PySide6.QtWidgets import (
 
 from wordflow.ai import (
     AIError,
+    PROVIDERS,
+    active_provider,
     client_from_settings,
+    configured_client,
     confusion_prompt,
     example_prompt,
     explain_prompt,
     mnemonic_prompt,
     plan_prompt,
+    provider_connection,
     reading_prompt,
+    save_provider_connection,
 )
 from wordflow.talk_clips import TalkResult, build_talk
 from wordflow.ui.common import card, page_header, tell
@@ -48,31 +53,54 @@ class AssistantPage(QWidget):
         layout.addWidget(
             page_header(
                 "在线助手",
-                "默认关闭。只有你点击下面的按钮时，才会把当前单词、例句或学习数量发到你自己填写的服务。"
-                "生成内容只供参考，不会变成词典释义，也不会当作测验答案。",
+                "选择服务商并填写 API Key 即可测试连接。模型生成的译文和例句供学习参考。",
             )
         )
         self.enabled = QCheckBox("启用在线助手")
-        self.consent = QCheckBox("我同意将所选内容发给填写的模型服务")
+        self.consent = QCheckBox("允许将所选学习内容发给当前模型服务")
+        self.material_consent = QCheckBox("导入素材时自动翻译和造句")
         self.enabled.toggled.connect(self._save_flags)
         self.consent.toggled.connect(self._save_flags)
+        self.material_consent.toggled.connect(self._save_flags)
+        self.provider = QComboBox()
+        self.provider.setAccessibleName("AI 服务商")
+        for key, preset in PROVIDERS.items():
+            self.provider.addItem(preset.name, key)
+        self.provider.currentIndexChanged.connect(self._change_provider)
         self.base_url = QLineEdit()
+        self.base_url.setAccessibleName("服务地址")
         self.base_url.setPlaceholderText("http://127.0.0.1:11434/v1 或兼容 OpenAI 的地址")
         self.model = QLineEdit()
-        self.model.setPlaceholderText("模型名称，例如 llama3.1 或 deepseek-chat")
+        self.model.setAccessibleName("模型名称")
+        self.model.setPlaceholderText("模型名称，例如 llama3.1")
         self.api_key = QLineEdit()
+        self.api_key.setAccessibleName("API Key")
         self.api_key.setEchoMode(QLineEdit.Password)
         self.api_key.setPlaceholderText("API 密钥。本地服务不需要时可以留空")
         for box in (self.base_url, self.model, self.api_key):
             box.editingFinished.connect(self._save_connection)
-        layout.addWidget(self.enabled)
-        layout.addWidget(self.consent)
-        layout.addWidget(self.base_url)
-        layout.addWidget(self.model)
-        layout.addWidget(self.api_key)
+        flags = QHBoxLayout()
+        flags.addWidget(self.enabled)
+        flags.addWidget(self.consent)
+        flags.addStretch(1)
+        layout.addLayout(flags)
+        layout.addWidget(self.material_consent)
+        material_note = QLabel("自动处理会发送英文转写、目标词和少量熟词。原始音视频和图片留在本机。")
+        material_note.setWordWrap(True)
+        material_note.setObjectName("muted")
+        layout.addWidget(material_note)
+        service = QHBoxLayout()
+        service.addWidget(self.provider)
+        service.addWidget(self.base_url, 2)
+        service.addWidget(self.model, 1)
+        layout.addLayout(service)
+        credentials = QHBoxLayout()
+        credentials.addWidget(self.api_key, 1)
         ping = QPushButton("测试连接")
+        ping.setToolTip("用固定的简短文字测试当前模型，不发送学习资料")
         ping.clicked.connect(lambda: self._run("ping"))
-        layout.addWidget(ping)
+        credentials.addWidget(ping)
+        layout.addLayout(credentials)
         layout.addWidget(self._talk_card())
         form = QHBoxLayout()
         self.lemma = QLineEdit()
@@ -152,15 +180,17 @@ class AssistantPage(QWidget):
         return frame
 
     def on_show(self) -> None:
-        self.enabled.blockSignals(True)
-        self.consent.blockSignals(True)
-        self.enabled.setChecked(self.ctx.settings.flag("ai_enabled"))
-        self.consent.setChecked(self.ctx.settings.flag("ai_consent"))
-        self.enabled.blockSignals(False)
-        self.consent.blockSignals(False)
-        self.base_url.setText(self.ctx.settings.get("ai_base_url", ""))
-        self.model.setText(self.ctx.settings.get("ai_model", ""))
-        self.api_key.setText(self.ctx.settings.get("ai_api_key", ""))
+        for box, key in ((self.enabled, "ai_enabled"), (self.consent, "ai_consent"),
+                         (self.material_consent, "ai_material_consent")):
+            box.blockSignals(True)
+            box.setChecked(self.ctx.settings.flag(key))
+            box.blockSignals(False)
+        self.material_consent.setEnabled(self.enabled.isChecked() and self.consent.isChecked())
+        provider = active_provider(self.ctx.settings)
+        self.provider.blockSignals(True)
+        self.provider.setCurrentIndex(self.provider.findData(provider))
+        self.provider.blockSignals(False)
+        self._load_connection(provider)
         index = self.talk_model.findData(self.ctx.settings.get("talk_model", "small"))
         self.talk_model.setCurrentIndex(max(index, 0))
         self._reload_history()
@@ -168,11 +198,27 @@ class AssistantPage(QWidget):
     def _save_flags(self) -> None:
         self.ctx.settings.set("ai_enabled", int(self.enabled.isChecked()))
         self.ctx.settings.set("ai_consent", int(self.consent.isChecked()))
+        self.ctx.settings.set("ai_material_consent", int(self.material_consent.isChecked()))
+        self.material_consent.setEnabled(self.enabled.isChecked() and self.consent.isChecked())
+
+    def _load_connection(self, provider: str) -> None:
+        config = provider_connection(self.ctx.settings, provider)
+        self.base_url.setReadOnly(provider != "custom")
+        self.base_url.setText(config.base_url)
+        self.model.setText(config.model)
+        self.api_key.setText(config.api_key)
+
+    def _change_provider(self) -> None:
+        provider = self.provider.currentData()
+        self._load_connection(provider)
+        self._save_connection()
 
     def _save_connection(self) -> None:
-        self.ctx.settings.set("ai_base_url", self.base_url.text().strip())
-        self.ctx.settings.set("ai_model", self.model.text().strip())
-        self.ctx.settings.set("ai_api_key", self.api_key.text().strip())
+        config = save_provider_connection(
+            self.ctx.settings, self.provider.currentData(), self.base_url.text(), self.model.text(), self.api_key.text()
+        )
+        self.api_key.setText(config.api_key)
+        self.material_consent.setChecked(self.ctx.settings.flag("ai_material_consent"))
 
     def _run(self, kind: str) -> None:
         if self.talk_cancel.isEnabled() or (self.worker and self.worker.isRunning()):
@@ -181,11 +227,12 @@ class AssistantPage(QWidget):
         self._save_flags()
         self._save_connection()
         try:
-            client = client_from_settings(self.ctx.settings)
+            client = configured_client(self.ctx.settings) if kind == "ping" else client_from_settings(self.ctx.settings)
             prepared = self._prepare(kind)
         except AIError as exc:
             tell(self, str(exc), "warn")
             return
+        prepared["model"] = client.model
         self.pending = prepared
         self.output.setPlainText("正在请求模型…")
 
@@ -362,13 +409,17 @@ class AssistantPage(QWidget):
     def _done(self, text: str) -> None:
         prepared = self.pending or {}
         notice = "以下内容由在线模型生成，只供参考，没有写入释义，也不会作为测验答案。\n\n"
-        self.output.setPlainText(notice + text)
+        if prepared.get("kind") == "ping":
+            text = f"已连接，模型 {prepared['model']} 已返回文字。"
+            self.output.setPlainText(text)
+        else:
+            self.output.setPlainText(notice + text)
         self.ctx.store.add_ai_record(
             kind=prepared.get("kind", ""),
             title=prepared.get("title", ""),
             preview=prepared.get("preview", ""),
             content=text,
-            model=self.ctx.settings.get("ai_model", ""),
+            model=prepared.get("model", ""),
             word_id=prepared.get("word_id"),
         )
         self._reload_history()
@@ -389,7 +440,7 @@ class AssistantPage(QWidget):
         if row < 0 or row >= len(self.records):
             return
         record = self.records[row]
-        if record["kind"] == "talk":
+        if record["kind"] in ("talk", "ping"):
             self.output.setPlainText(record["content"])
             return
         self.output.setPlainText(

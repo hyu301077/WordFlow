@@ -163,7 +163,8 @@ class SettingsPage(QWidget):
             button.clicked.connect(slot)
             data_actions.addWidget(button, index // 3, index % 3)
         data_layout.addLayout(data_actions)
-        note = QLabel("恢复前会先另存当前数据库。自动备份每天保留一份，最多 10 份。")
+        note = QLabel("恢复前会先另存当前数据库。自动备份每天保留一份，最多 10 份。"
+                      "备份仅含学习数据库；换电脑时也请复制数据目录下的 materials 和 screenshots 文件夹。")
         note.setWordWrap(True)
         note.setObjectName("muted")
         data_layout.addWidget(note)
